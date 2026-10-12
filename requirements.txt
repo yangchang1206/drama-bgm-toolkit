@@ -1,0 +1,17 @@
+# Python dependencies
+# Install: pip install -r requirements.txt
+# Use CPU torch; use a mirror in China.
+
+# Audio analysis
+librosa>=0.10.0
+soundfile>=0.12.1
+numpy>=1.24
+
+# CLAP semantic embedding
+torch>=2.0.0
+transformers>=4.40.0
+
+# Local voice detection
+silero-vad>=6.0.0
+
+# ffmpeg must be installed separately for trim/convert: https://ffmpeg.org/download.html

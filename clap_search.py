@@ -1,0 +1,63 @@
+# -*- coding: utf-8 -*-
+"""
+Natural language music search:
+  python clap_search.py "tense thriller dark cinematic" --top 10
+Args:
+  --no-vocal   Only instrumental (recommended)
+  --dedup      Deduplicate (primary version only)
+  --top N      Return top N results
+"""
+import os, sys, sqlite3, argparse
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import config
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("query", help="Emotion description, English works best, e.g. 'sad emotional piano'")
+    ap.add_argument("--top", type=int, default=10)
+    ap.add_argument("--no-vocal", action="store_true")
+    ap.add_argument("--dedup", action="store_true")
+    args = ap.parse_args()
+
+    os.environ["HF_ENDPOINT"] = config.HF_ENDPOINT
+    import torch
+    from transformers import ClapModel, ClapProcessor
+
+    model = ClapModel.from_pretrained(config.CLAP_MODEL).eval()
+    processor = ClapProcessor.from_pretrained(config.CLAP_MODEL)
+    inp = processor(text=[args.query], return_tensors="pt", padding=True)
+    with torch.no_grad():
+        out = model.get_text_features(**inp)
+        te = out.pooler_output.numpy()[0]
+        te = te / np.linalg.norm(te)
+
+    conn = sqlite3.connect(config.DB_PATH)
+    sql = """SELECT s.id, s.filename, s.fullpath, s.lib, s.bpm, s.rms, s.duration, s.has_vocals, e.embed
+             FROM songs s JOIN clap_embeds e ON s.id=e.song_id WHERE 1=1"""
+    params = []
+    if args.no_vocal:
+        sql += " AND s.has_vocals='no'"
+    if args.dedup:
+        sql += " AND (s.dup_role='primary' OR s.dup_role IS NULL)"
+    rows = conn.execute(sql, params).fetchall()
+
+    scores = []
+    for sid, fn, fp, lib, bpm, rms, dur, hv, emb in rows:
+        ae = np.frombuffer(emb, dtype=np.float32)
+        ae = ae / (np.linalg.norm(ae) + 1e-8)
+        sim = float((te * ae).sum())
+        scores.append((sim, fn, fp, lib, bpm, rms, dur))
+    scores.sort(reverse=True)
+    conn.close()
+
+    print(f"\nQuery: {args.query}")
+    print(f"Matches: {len(scores)}, Top {args.top}:\n")
+    for i, (sim, fn, fp, lib, bpm, rms, dur) in enumerate(scores[:args.top], 1):
+        print(f"{i:2d}. [{sim:.3f}] {fn}")
+        print(f"    lib={lib}  bpm={bpm:.0f}  dur={dur:.0f}s")
+        print(f"    {fp}\n")
+
+if __name__ == "__main__":
+    main()
