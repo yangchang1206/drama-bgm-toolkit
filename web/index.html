@@ -13,7 +13,7 @@ h1 { text-align: center; padding: 16px; font-size: 22px; }
 .row { display: grid; grid-template-columns: 1fr 1.2fr 1.2fr; gap: 12px; padding: 0 16px 16px; }
 .col { background: #fff; border-radius: 8px; padding: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 .col h3 { font-size: 14px; margin-bottom: 8px; }
-textarea, input { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
+textarea, input, select { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
 textarea { min-height: 180px; resize: vertical; }
 button { padding: 8px 14px; border: none; border-radius: 4px; background: #4f46e5; color: #fff; cursor: pointer; font-size: 13px; margin-top: 8px; margin-right: 6px; }
 button:hover { background: #4338ca; }
@@ -44,12 +44,15 @@ input[type=range] { width: 100%; margin-top: 6px; }
 .api-msg.err { color:#dc2626; }
 .export-btn { width:100%; padding:12px; font-size:15px; margin-top:12px; background:#059669; }
 .query-box { background:#f0f9ff; border-left:3px solid #0284c7; padding:6px 8px; margin-top:6px; font-size:11px; color:#075985; }
+.fmt-row { display:flex; gap:8px; align-items:center; margin-top:10px; }
+.fmt-row label { font-size:12px; color:#666; white-space:nowrap; }
+.fmt-row select { flex:1; }
 @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
 <h1>🎬 BGM 工作台</h1>
-<div class="sub">纯前端 · 选音乐库 → 粘贴剧本 → 自动选曲 → 导出MP3</div>
+<div class="sub">纯前端 · 选音乐库 → 粘贴剧本 → 自动选曲 → 导出MP3/WAV</div>
 
 <div class="api-box">
   <label>🔑 阿里云API Key:</label>
@@ -83,7 +86,14 @@ input[type=range] { width: 100%; margin-top: 6px; }
     <textarea id="script" placeholder="粘贴整集剧本（含 35-1、35-2 等场号）"></textarea>
     <input type="file" id="video" accept="video/*" style="margin-top:8px;">
     <button id="analyzeBtn" disabled>🔍 分析并自动选曲</button>
-    <button id="exportAllBtn" class="export-btn green" disabled>💾 导出整集BGM (MP3)</button>
+    <div class="fmt-row">
+      <label>导出格式:</label>
+      <select id="fmtSelect">
+        <option value="mp3">MP3（192kbps，推荐）</option>
+        <option value="wav">WAV（无损，文件大）</option>
+      </select>
+    </div>
+    <button id="exportAllBtn" class="export-btn green" disabled>💾 导出整集BGM</button>
     <div class="pbar-wrap" id="pbarWrap"><div class="pbar" id="pbar" style="width:0%">0%</div></div>
     <div id="status" class="status"></div>
   </div>
@@ -258,7 +268,7 @@ document.getElementById("analyzeBtn").onclick = async () => {
   }
   setProgress(bar, 100, "完成");
   renderSegList();
-  st.textContent = `✅ 完成！共${n}段，视频${dur.toFixed(1)}秒。点段查看，最后导出整集MP3。`;
+  st.textContent = `✅ 完成！共${n}段，视频${dur.toFixed(1)}秒。点段查看，最后导出。`;
   document.getElementById("exportAllBtn").disabled = false;
 };
 
@@ -386,7 +396,6 @@ function crossfadeConcat(bufs, overlap=2.0) {
   return result;
 }
 
-// AudioBuffer -> MP3 blob (lamejs)
 function bufferToMp3(buf, kbps=192) {
   const numCh = Math.min(2, buf.numberOfChannels);
   const sampleRate = buf.sampleRate;
@@ -412,6 +421,27 @@ function bufferToMp3(buf, kbps=192) {
   return new Blob(out, {type:"audio/mp3"});
 }
 
+function bufferToWav(buf) {
+  const numCh = buf.numberOfChannels, sampleRate = buf.sampleRate;
+  const bytesPerSample = 2;
+  const length = buf.length * numCh * bytesPerSample;
+  const ab = new ArrayBuffer(44 + length);
+  const view = new DataView(ab);
+  const writeStr = (off, s) => { for(let i=0;i<s.length;i++) view.setUint8(off+i, s.charCodeAt(i)); };
+  writeStr(0, "RIFF"); view.setUint32(4, 36+length, true); writeStr(8, "WAVE");
+  writeStr(12, "fmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+  view.setUint16(22, numCh, true); view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate*numCh*bytesPerSample, true);
+  view.setUint16(32, numCh*bytesPerSample, true); view.setUint16(34, 16, true);
+  writeStr(36, "data"); view.setUint32(40, length, true);
+  let off = 44;
+  for (let i=0;i<buf.length;i++) for (let ch=0;ch<numCh;ch++) {
+    let s = Math.max(-1, Math.min(1, buf.getChannelData(ch)[i]));
+    view.setInt16(off, s<0?s*0x8000:s*0x7FFF, true); off += 2;
+  }
+  return new Blob([ab], {type:"audio/wav"});
+}
+
 function applyFade(buf, fadeIn, fadeOut) {
   const sr = buf.sampleRate;
   const fiLen = Math.floor(fadeIn*sr), foLen = Math.floor(fadeOut*sr);
@@ -426,6 +456,7 @@ document.getElementById("exportAllBtn").onclick = async () => {
   if (!STATE.segments.length) { alert("请先分析"); return; }
   const bar = document.getElementById("pbar");
   const st = document.getElementById("status");
+  const fmt = document.getElementById("fmtSelect").value;
   const bufs = [];
   for (let i=0;i<STATE.segments.length;i++) {
     const s = STATE.segments[i];
@@ -433,17 +464,23 @@ document.getElementById("exportAllBtn").onclick = async () => {
     if (!cur) continue;
     const fh = SONG_MAP[cur.fn.toLowerCase()];
     if (!fh) { continue; }
-    setProgress(bar, Math.round((i/STATE.segments.length)*85), `解码${s.id}`);
+    setProgress(bar, Math.round((i/STATE.segments.length)*80), `解码${s.id}`);
     const full = await decodeAudioFile(fh);
     bufs.push(sliceBuffer(full, s.srcStart, s.srcDur));
   }
-  setProgress(bar, 90, "crossfade拼接...");
+  setProgress(bar, 88, "crossfade拼接...");
   await new Promise(r=>setTimeout(r,100));
   const mixed = crossfadeConcat(bufs, 2.0);
   applyFade(mixed, 2.0, 2.0);
-  setProgress(bar, 95, "编码MP3...");
-  const blob = bufferToMp3(mixed, 192);
-  const fname = `BGM_${STATE.duration.toFixed(0)}s.mp3`;
+  let blob, ext, desc;
+  if (fmt === "mp3") {
+    setProgress(bar, 95, "编码MP3...");
+    blob = bufferToMp3(mixed, 192); ext = "mp3"; desc = "MP3 192kbps";
+  } else {
+    setProgress(bar, 95, "打包WAV...");
+    blob = bufferToWav(mixed); ext = "wav"; desc = "WAV无损";
+  }
+  const fname = `BGM_${STATE.duration.toFixed(0)}s.${ext}`;
   if (OUT_DIR) {
     const w = await OUT_DIR.getFileHandle(fname, {create:true});
     const w2 = await w.createWritable();
@@ -452,7 +489,7 @@ document.getElementById("exportAllBtn").onclick = async () => {
   } else {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob); a.download = fname; a.click();
-    st.textContent = `✅ 已导出 ${fname}（${mixed.duration.toFixed(1)}秒，MP3 192kbps）`;
+    st.textContent = `✅ 已导出 ${fname}（${mixed.duration.toFixed(1)}秒，${desc}）`;
   }
   setProgress(bar, 100, "完成");
 };
