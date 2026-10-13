@@ -14,9 +14,11 @@ h1 { text-align: center; padding: 16px; font-size: 22px; }
 .col h3 { font-size: 14px; margin-bottom: 8px; }
 textarea, input { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
 textarea { min-height: 180px; resize: vertical; }
-button { padding: 8px 14px; border: none; border-radius: 4px; background: #4f46e5; color: #fff; cursor: pointer; font-size: 13px; margin-top: 8px; }
+button { padding: 8px 14px; border: none; border-radius: 4px; background: #4f46e5; color: #fff; cursor: pointer; font-size: 13px; margin-top: 8px; margin-right: 6px; }
 button:hover { background: #4338ca; }
 button:disabled { background: #ccc; cursor: not-allowed; }
+button.secondary { background: #6b7280; }
+button.green { background: #059669; }
 .seg { padding: 8px; border: 1px solid #e5e7eb; border-radius: 4px; margin-bottom: 6px; cursor: pointer; font-size: 12px; }
 .seg:hover { background: #f3f4f6; }
 .seg.active { border-color: #4f46e5; background: #eef2ff; }
@@ -24,9 +26,11 @@ button:disabled { background: #ccc; cursor: not-allowed; }
 .status { font-size: 12px; color: #666; margin-top: 8px; white-space: pre-wrap; }
 .song { font-size: 12px; padding: 4px; background: #f9fafb; border-radius: 3px; margin-bottom: 3px; cursor: pointer; }
 .song.sel { background: #dbeafe; }
-audio { width: 100%; margin-top: 8px; }
 .fileinfo { font-size: 12px; color: #059669; margin-top: 4px; }
 .banner { background: #fef3c7; padding: 8px; border-radius: 4px; font-size: 12px; margin-bottom: 8px; color: #92400e; }
+.player { margin-top: 10px; padding: 10px; background: #f9fafb; border-radius: 6px; }
+.player .time { display: flex; justify-content: space-between; font-size: 11px; color: #666; margin-top: 4px; }
+input[type=range] { width: 100%; margin-top: 6px; }
 @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -34,12 +38,18 @@ audio { width: 100%; margin-top: 8px; }
 <h1>🎬 BGM 工作台</h1>
 <div class="sub">纯前端 · 选音乐库 → 粘贴剧本 → 自动选曲 → 导出MP3</div>
 
-<div style="padding:0 16px 12px;">
+<div style="padding:0 16px 12px; display:grid; grid-template-columns:1fr 1fr; gap:12px;">
   <div class="col" style="padding:10px;">
-    <b>① 选择你的音乐库文件夹</b>
-    <div class="banner">点按钮选择BGM素材文件夹（会自动递归扫描子文件夹）。网页只在本地运行，不上传文件。</div>
+    <b>① 音乐库文件夹</b>
+    <div class="banner">自动递归扫描子文件夹，网页只在本地运行。</div>
     <button id="pickBtn">📁 选择音乐文件夹</button>
     <div id="fileInfo" class="fileinfo">未选择</div>
+  </div>
+  <div class="col" style="padding:10px;">
+    <b>导出位置</b>
+    <div class="banner">选BGM导出到哪个文件夹。</div>
+    <button id="pickOutBtn" class="secondary">📂 选择导出文件夹</button>
+    <div id="outInfo" class="fileinfo">未选（默认浏览器下载）</div>
   </div>
 </div>
 
@@ -56,7 +66,7 @@ audio { width: 100%; margin-top: 8px; }
     <div id="segList"><div style="color:#aaa;font-size:12px;">分析后显示分段</div></div>
   </div>
   <div class="col">
-    <h3>④ 段详情</h3>
+    <h3>④ 段详情 / 试听</h3>
     <div id="detail"><div style="color:#aaa;font-size:12px;">点左侧某段查看</div></div>
   </div>
 </div>
@@ -65,7 +75,8 @@ audio { width: 100%; margin-top: 8px; }
 import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2";
 env.allowLocalModels = false;
 
-let EMB = [], SONG_MAP = {};
+let EMB = [], SONG_MAP = {}, OUT_DIR = null;
+let curAudio = null;
 let STATE = { segments: [], cur: 0, duration: 0 };
 
 const MOOD_MAP = {
@@ -90,26 +101,29 @@ async function loadEmb() {
 }
 loadEmb();
 
-// 递归扫描文件夹
 async function scanDir(dirHandle, map) {
   for await (const entry of dirHandle.values()) {
-    if (entry.kind === "directory") {
-      await scanDir(entry, map);
-    } else if (entry.kind === "file" && /\.(mp3|wav|m4a|ogg|flac)$/i.test(entry.name)) {
-      map[entry.name.toLowerCase()] = entry;
-    }
+    if (entry.kind === "directory") await scanDir(entry, map);
+    else if (entry.kind === "file" && /\.(mp3|wav|m4a|ogg|flac)$/i.test(entry.name)) map[entry.name.toLowerCase()] = entry;
   }
 }
 
 document.getElementById("pickBtn").onclick = async () => {
   try {
-    const dirHandle = await window.showDirectoryPicker();
+    const h = await window.showDirectoryPicker();
     SONG_MAP = {};
-    document.getElementById("fileInfo").textContent = "扫描中（含子文件夹）...";
-    await scanDir(dirHandle, SONG_MAP);
-    document.getElementById("fileInfo").textContent = `已选：${dirHandle.name}（${Object.keys(SONG_MAP).length} 首）`;
+    document.getElementById("fileInfo").textContent = "扫描中...";
+    await scanDir(h, SONG_MAP);
+    document.getElementById("fileInfo").textContent = `已选：${h.name}（${Object.keys(SONG_MAP).length} 首）`;
     document.getElementById("analyzeBtn").disabled = false;
-  } catch(e) { console.log(e); }
+  } catch(e) {}
+};
+
+document.getElementById("pickOutBtn").onclick = async () => {
+  try {
+    OUT_DIR = await window.showDirectoryPicker();
+    document.getElementById("outInfo").textContent = `导出到：${OUT_DIR.name}`;
+  } catch(e) {}
 };
 
 document.getElementById("analyzeBtn").onclick = async () => {
@@ -130,9 +144,7 @@ document.getElementById("analyzeBtn").onclick = async () => {
   for (let i=0;i<scenes.length;i++) {
     const text = scenes[i].text;
     let mood = "紧张/对峙";
-    for (const k of Object.keys(MOOD_MAP)) {
-      if (k.split("/").some(kw => text.includes(kw))) { mood = k; break; }
-    }
+    for (const k of Object.keys(MOOD_MAP)) if (k.split("/").some(kw => text.includes(kw))) { mood = k; break; }
     const query = MOOD_MAP[mood][0];
     st.textContent = `场${scenes[i].id}搜曲...`;
     const out = await txtPipe(query, {pooling: "mean"});
@@ -176,8 +188,10 @@ function renderSegList() {
     el.appendChild(d);
   });
 }
+
 async function renderDetail() {
   const s = STATE.segments[STATE.cur]; if (!s) return;
+  if (curAudio) { curAudio.pause(); curAudio = null; }
   const el = document.getElementById("detail");
   const cur = s.candidates[s.track];
   el.innerHTML = `<b>段 ${s.id}</b> <span class="mood">${s.mood}</span><br>
@@ -187,8 +201,13 @@ async function renderDetail() {
       <label style="font-size:12px;">结束: <input type="number" id="en" value="${s.end.toFixed(1)}" step="0.5" style="width:70px;"></label>
     </div>
     <div id="cands" style="margin-top:8px;"></div>
-    <button id="previewBtn">▶ 试听此段</button>
-    <div id="audioBox"></div>`;
+    <button id="previewBtn">▶ 播放</button>
+    <button id="pauseBtn" class="secondary">⏸ 暂停</button>
+    <button id="exportBtn" class="green">💾 导出此段MP3</button>
+    <div class="player">
+      <input type="range" id="seekBar" min="0" max="100" value="0">
+      <div class="time"><span id="curTime">0:00</span><span id="durTime">0:00</span></div>
+    </div>`;
   const cands = document.getElementById("cands");
   s.candidates.forEach((c,i) => {
     const d = document.createElement("div");
@@ -197,15 +216,49 @@ async function renderDetail() {
     d.onclick = () => { s.track = i; renderDetail(); };
     cands.appendChild(d);
   });
+
   document.getElementById("previewBtn").onclick = async () => {
     s.start = parseFloat(document.getElementById("st").value);
     s.end = parseFloat(document.getElementById("en").value);
     const fh = SONG_MAP[cur.fn.toLowerCase()];
     if (!fh) { alert("找不到文件："+cur.fn); return; }
+    if (curAudio) curAudio.pause();
     const file = await fh.getFile();
-    document.getElementById("audioBox").innerHTML = `<audio controls src="${URL.createObjectURL(file)}#t=${s.start},${s.end}"></audio>`;
+    curAudio = new Audio(URL.createObjectURL(file));
+    curAudio.currentTime = s.start;
+    curAudio.play();
+    const bar = document.getElementById("seekBar");
+    curAudio.ontimeupdate = () => {
+      const pct = ((curAudio.currentTime - s.start) / (s.end - s.start)) * 100;
+      bar.value = Math.max(0, Math.min(100, pct));
+      document.getElementById("curTime").textContent = fmt(curAudio.currentTime - s.start);
+      if (curAudio.currentTime >= s.end) curAudio.pause();
+    };
+    curAudio.onloadedmetadata = () => {
+      document.getElementById("durTime").textContent = fmt(s.end - s.start);
+    };
+    bar.oninput = () => { curAudio.currentTime = s.start + (bar.value/100)*(s.end-s.start); };
+  };
+  document.getElementById("pauseBtn").onclick = () => { if (!curAudio) return; if (curAudio.paused) curAudio.play(); else curAudio.pause(); };
+  document.getElementById("exportBtn").onclick = async () => {
+    const fh = SONG_MAP[cur.fn.toLowerCase()];
+    if (!fh) { alert("找不到文件"); return; }
+    const file = await fh.getFile();
+    if (OUT_DIR) {
+      const w = await OUT_DIR.getFileHandle(`${s.id}_${cur.fn}`, {create:true});
+      const w2 = await w.createWritable();
+      await w2.write(await file.slice(s.start, s.end).arrayBuffer());
+      await w2.close();
+      alert("已导出到：" + OUT_DIR.name);
+    } else {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(await file.slice(s.start, s.end).arrayBuffer());
+      a.download = `${s.id}_${cur.fn}`;
+      a.click();
+    }
   };
 }
+function fmt(t) { t=Math.max(0,t|0); return `${(t/60)|0}:${String(t%60).padStart(2,'0')}`; }
 </script>
 </body>
 </html>
