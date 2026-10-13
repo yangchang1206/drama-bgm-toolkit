@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <title>BGM工作台</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background: #f5f6fa; color: #222; }
@@ -48,7 +49,7 @@ input[type=range] { width: 100%; margin-top: 6px; }
 </head>
 <body>
 <h1>🎬 BGM 工作台</h1>
-<div class="sub">纯前端 · 选音乐库 → 粘贴剧本 → 自动选曲 → 导出WAV</div>
+<div class="sub">纯前端 · 选音乐库 → 粘贴剧本 → 自动选曲 → 导出MP3</div>
 
 <div class="api-box">
   <label>🔑 阿里云API Key:</label>
@@ -82,7 +83,7 @@ input[type=range] { width: 100%; margin-top: 6px; }
     <textarea id="script" placeholder="粘贴整集剧本（含 35-1、35-2 等场号）"></textarea>
     <input type="file" id="video" accept="video/*" style="margin-top:8px;">
     <button id="analyzeBtn" disabled>🔍 分析并自动选曲</button>
-    <button id="exportAllBtn" class="export-btn green" disabled>💾 导出整集BGM (WAV)</button>
+    <button id="exportAllBtn" class="export-btn green" disabled>💾 导出整集BGM (MP3)</button>
     <div class="pbar-wrap" id="pbarWrap"><div class="pbar" id="pbar" style="width:0%">0%</div></div>
     <div id="status" class="status"></div>
   </div>
@@ -142,10 +143,7 @@ function setProgress(el, pct, text) {
 }
 
 async function loadEmb() {
-  try {
-    const r = await fetch("web_embeddings.json");
-    EMB = await r.json();
-  } catch(e) { console.error(e); }
+  try { const r = await fetch("web_embeddings.json"); EMB = await r.json(); } catch(e) { console.error(e); }
 }
 loadEmb();
 
@@ -211,45 +209,23 @@ async function decodeAudioFile(fileHandle) {
   return await getCtx().decodeAudioData(buf);
 }
 
-// 根据剧本内容判断情绪并生成搜索query
 function analyzeMood(text) {
   const t = text;
-  // 提取动作描述行（▲开头）和台词
   const hasAction = /(滑降|悬崖|绝壁|绳索|阵风|搏斗|打|杀|爆|冲|摔|撕|逼|威胁|刀|血|追|逃|枪|棍|拳|踢)/.test(t);
   const hasDanger = /(危险|恐|怕|抖|惊|吓|死|丧|危机|陷|困|伤|痛|泪|哭|委屈|心酸|心碎|难|怒|吼|咆哮)/.test(t);
-  const hasWarm = /(抱|亲|笑|开心|幸福|团圆|亲|家|温馨|感动|眼眶通红|敬慕|父子|父女|妈妈|爸爸|回家)/.test(t);
+  const hasWarm = /(抱|亲|笑|开心|幸福|团圆|家|温馨|感动|眼眶通红|敬慕|父子|父女|妈妈|爸爸|回家)/.test(t);
   const hasMystery = /(神秘|诡异|阴谋|暗|黑|沉|信号弹|伏笔|敌人|维克多|集团|商业)/.test(t);
   const hasTriumph = /(赢|胜|成功|奇迹|极品|至宝|拿下|庆祝|自信|阔步|金色|返程)/.test(t);
 
-  let mood = "日常";
-  let query = "";
-
-  // 优先级：动作危险 > 危险冲突 > 胜利史诗 > 温暖 > 悬疑
-  if (hasAction && hasDanger) {
-    mood = "紧张动作";
-    query = "tenner action adventure cliff danger suspense epic tense drums thriller cinematic chase";
-  } else if (hasAction) {
-    mood = "冒险史诗";
-    query = "adventure epic mountain exploration brave determined cinematic orchestral uplifting";
-  } else if (hasDanger) {
-    mood = "紧张对峙";
-    query = "tense suspense confrontation danger dark thriller emotional dramatic";
-  } else if (hasTriumph && hasWarm) {
-    mood = "胜利温情";
-    query = "triumphant warm heartwarming victory family emotional orchestral strings hopeful cinematic";
-  } else if (hasTriumph) {
-    mood = "胜利史诗";
-    query = "triumphant epic victorious heroic victory brass orchestral uplifting cinematic";
-  } else if (hasWarm) {
-    mood = "温暖治愈";
-    query = "warm healing tender emotional piano strings family touching cinematic gentle";
-  } else if (hasMystery) {
-    mood = "悬疑危险";
-    query = "mysterious dark suspense conspiracy danger ominous thriller tense low drone";
-  } else {
-    mood = "日常轻松";
-    query = "light casual warm acoustic gentle everyday peaceful pleasant";
-  }
+  let mood = "日常", query = "";
+  if (hasAction && hasDanger) { mood = "紧张动作"; query = "tense action adventure cliff danger suspense epic drums thriller cinematic"; }
+  else if (hasAction) { mood = "冒险史诗"; query = "adventure epic mountain exploration brave determined orchestral uplifting"; }
+  else if (hasDanger) { mood = "紧张对峙"; query = "tense suspense confrontation danger dark thriller dramatic"; }
+  else if (hasTriumph && hasWarm) { mood = "胜利温情"; query = "triumphant warm heartwarming victory family emotional strings hopeful"; }
+  else if (hasTriumph) { mood = "胜利史诗"; query = "triumphant epic victorious heroic brass orchestral uplifting"; }
+  else if (hasWarm) { mood = "温暖治愈"; query = "warm healing tender emotional piano strings family touching"; }
+  else if (hasMystery) { mood = "悬疑危险"; query = "mysterious dark suspense conspiracy ominous thriller tense low drone"; }
+  else { mood = "日常轻松"; query = "light casual warm acoustic gentle everyday peaceful"; }
   return { mood, query };
 }
 
@@ -266,35 +242,23 @@ document.getElementById("analyzeBtn").onclick = async () => {
   const scenes = parseScenes(script);
   const n = scenes.length || 1;
   const segLen = dur / n;
-
   STATE.segments = [];
-  const usedSongs = new Set(); // 去重
-
+  const usedSongs = new Set();
   for (let i=0;i<scenes.length;i++) {
-    const text = scenes[i].text;
-    const { mood, query } = analyzeMood(text);
-    const pct = 10 + Math.round((i/n)*85);
-    setProgress(bar, pct, `场${scenes[i].id} [${mood}] 搜曲中 (${i+1}/${n})`);
+    const { mood, query } = analyzeMood(scenes[i].text);
+    setProgress(bar, 10 + Math.round((i/n)*85), `场${scenes[i].id} [${mood}] 搜曲中 (${i+1}/${n})`);
     const q = await embedText(query);
     const qn = norm(q);
-    let scores = EMB.filter(e => e.voc !== "yes" && SONG_MAP[e.fn.toLowerCase()])
-      .filter(e => !usedSongs.has(e.fn)) // 已选过的去重
-      .map(e => {
-        const en = norm(decodeVec(e.v));
-        let s = 0; for (let j=0;j<qn.length;j++) s += qn[j]*en[j];
-        return {sim: s, fn: e.fn};
-      });
+    let scores = EMB.filter(e => e.voc !== "yes" && SONG_MAP[e.fn.toLowerCase()] && !usedSongs.has(e.fn))
+      .map(e => { const en = norm(decodeVec(e.v)); let s=0; for(let j=0;j<qn.length;j++) s+=qn[j]*en[j]; return {sim:s, fn:e.fn}; });
     scores.sort((a,b)=>b.sim-a.sim);
     const top = scores.slice(0,10);
-    if (top.length) usedSongs.add(top[0].fn); // 记录已选
-    STATE.segments.push({
-      id: scenes[i].id, timeStart: i*segLen, timeEnd: (i+1)*segLen,
-      mood, query, candidates: top, track: 0, srcStart: 2, srcDur: segLen+2
-    });
+    if (top.length) usedSongs.add(top[0].fn);
+    STATE.segments.push({ id: scenes[i].id, timeStart: i*segLen, timeEnd: (i+1)*segLen, mood, query, candidates: top, track: 0, srcStart: 2, srcDur: segLen+2 });
   }
   setProgress(bar, 100, "完成");
   renderSegList();
-  st.textContent = `✅ 完成！共${n}段，视频${dur.toFixed(1)}秒。点段查看，最后导出整集。`;
+  st.textContent = `✅ 完成！共${n}段，视频${dur.toFixed(1)}秒。点段查看，最后导出整集MP3。`;
   document.getElementById("exportAllBtn").disabled = false;
 };
 
@@ -422,25 +386,40 @@ function crossfadeConcat(bufs, overlap=2.0) {
   return result;
 }
 
-function bufferToWav(buf) {
-  const numCh = buf.numberOfChannels, sampleRate = buf.sampleRate;
-  const bytesPerSample = 2;
-  const length = buf.length * numCh * bytesPerSample;
-  const ab = new ArrayBuffer(44 + length);
-  const view = new DataView(ab);
-  const writeStr = (off, s) => { for(let i=0;i<s.length;i++) view.setUint8(off+i, s.charCodeAt(i)); };
-  writeStr(0, "RIFF"); view.setUint32(4, 36+length, true); writeStr(8, "WAVE");
-  writeStr(12, "fmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
-  view.setUint16(22, numCh, true); view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate*numCh*bytesPerSample, true);
-  view.setUint16(32, numCh*bytesPerSample, true); view.setUint16(34, 16, true);
-  writeStr(36, "data"); view.setUint32(40, length, true);
-  let off = 44;
-  for (let i=0;i<buf.length;i++) for (let ch=0;ch<numCh;ch++) {
-    let s = Math.max(-1, Math.min(1, buf.getChannelData(ch)[i]));
-    view.setInt16(off, s<0?s*0x8000:s*0x7FFF, true); off += 2;
+// AudioBuffer -> MP3 blob (lamejs)
+function bufferToMp3(buf, kbps=192) {
+  const numCh = Math.min(2, buf.numberOfChannels);
+  const sampleRate = buf.sampleRate;
+  const enc = new lamejs.Mp3Encoder(numCh, sampleRate, kbps);
+  const left = buf.getChannelData(0);
+  const right = numCh === 2 ? buf.getChannelData(1) : null;
+  const blockSize = 1152;
+  const samples = buf.length;
+  const out = [];
+  for (let i=0; i<samples; i+=blockSize) {
+    const leftChunk = new Int16Array(blockSize);
+    const rightChunk = numCh === 2 ? new Int16Array(blockSize) : null;
+    for (let j=0;j<blockSize && i+j<samples;j++) {
+      const l = Math.max(-1, Math.min(1, left[i+j]));
+      leftChunk[j] = l<0 ? l*0x8000 : l*0x7FFF;
+      if (rightChunk) { const r = Math.max(-1, Math.min(1, right[i+j])); rightChunk[j] = r<0 ? r*0x8000 : r*0x7FFF; }
+    }
+    const mp3buf = numCh === 2 ? enc.encodeBuffer(leftChunk, rightChunk) : enc.encodeBuffer(leftChunk);
+    if (mp3buf.length > 0) out.push(new Uint8Array(mp3buf));
   }
-  return new Blob([ab], {type:"audio/wav"});
+  const end = enc.flush();
+  if (end.length > 0) out.push(new Uint8Array(end));
+  return new Blob(out, {type:"audio/mp3"});
+}
+
+function applyFade(buf, fadeIn, fadeOut) {
+  const sr = buf.sampleRate;
+  const fiLen = Math.floor(fadeIn*sr), foLen = Math.floor(fadeOut*sr);
+  for (let ch=0; ch<buf.numberOfChannels; ch++) {
+    const d = buf.getChannelData(ch);
+    for (let i=0;i<fiLen && i<d.length;i++) d[i] *= i/fiLen;
+    for (let i=0;i<foLen && i<d.length;i++) d[d.length-1-i] *= i/foLen;
+  }
 }
 
 document.getElementById("exportAllBtn").onclick = async () => {
@@ -453,18 +432,18 @@ document.getElementById("exportAllBtn").onclick = async () => {
     const cur = s.candidates[s.track];
     if (!cur) continue;
     const fh = SONG_MAP[cur.fn.toLowerCase()];
-    if (!fh) { st.textContent = `跳过${s.id}`; continue; }
-    setProgress(bar, Math.round((i/STATE.segments.length)*90), `解码${s.id}`);
+    if (!fh) { continue; }
+    setProgress(bar, Math.round((i/STATE.segments.length)*85), `解码${s.id}`);
     const full = await decodeAudioFile(fh);
     bufs.push(sliceBuffer(full, s.srcStart, s.srcDur));
   }
-  setProgress(bar, 92, "crossfade拼接...");
+  setProgress(bar, 90, "crossfade拼接...");
   await new Promise(r=>setTimeout(r,100));
   const mixed = crossfadeConcat(bufs, 2.0);
   applyFade(mixed, 2.0, 2.0);
-  setProgress(bar, 97, "导出WAV...");
-  const blob = bufferToWav(mixed);
-  const fname = `BGM_${STATE.duration.toFixed(0)}s.wav`;
+  setProgress(bar, 95, "编码MP3...");
+  const blob = bufferToMp3(mixed, 192);
+  const fname = `BGM_${STATE.duration.toFixed(0)}s.mp3`;
   if (OUT_DIR) {
     const w = await OUT_DIR.getFileHandle(fname, {create:true});
     const w2 = await w.createWritable();
@@ -473,20 +452,11 @@ document.getElementById("exportAllBtn").onclick = async () => {
   } else {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob); a.download = fname; a.click();
-    st.textContent = `✅ 已导出 ${fname}（${mixed.duration.toFixed(1)}秒）`;
+    st.textContent = `✅ 已导出 ${fname}（${mixed.duration.toFixed(1)}秒，MP3 192kbps）`;
   }
   setProgress(bar, 100, "完成");
 };
 
-function applyFade(buf, fadeIn, fadeOut) {
-  const sr = buf.sampleRate;
-  const fiLen = Math.floor(fadeIn*sr), foLen = Math.floor(fadeOut*sr);
-  for (let ch=0; ch<buf.numberOfChannels; ch++) {
-    const d = buf.getChannelData(ch);
-    for (let i=0;i<fiLen && i<d.length;i++) d[i] *= i/fiLen;
-    for (let i=0;i<foLen && i<d.length;i++) d[d.length-1-i] *= i/foLen;
-  }
-}
 function fmt(t) { t=Math.max(0,t|0); return `${(t/60)|0}:${String(t%60).padStart(2,'0')}`; }
 </script>
 </body>
