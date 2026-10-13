@@ -54,6 +54,7 @@ input[type=range] { width: 100%; margin-top: 6px; }
 .tp-row input { margin-top:4px; font-family:Consolas,monospace; font-size:12px; }
 .video-info { font-size:12px; color:#059669; margin-top:4px; }
 .detect-box { margin-top:6px; padding:8px; background:#f5f3ff; border-radius:6px; font-size:12px; }
+.merge-info { font-size:11px; color:#6b21a8; margin-top:4px; }
 @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -95,11 +96,12 @@ input[type=range] { width: 100%; margin-top: 6px; }
     <div id="videoInfo" class="video-info">未选视频</div>
     <div class="detect-box">
       <button id="detectBtn" class="purple" disabled>🎬 自动检测镜头切换点</button>
-      <div style="font-size:11px;color:#6b21a8;margin-top:4px;">本地抽帧+帧差分析，视频不上传。检测完自动填下面输入框。</div>
+      <div style="font-size:11px;color:#6b21a8;margin-top:4px;">本地抽帧+帧差分析，视频不上传。自动合并短段，目标5-15段BGM。</div>
+      <div id="mergeInfo" class="merge-info"></div>
     </div>
     <div class="tp-row">
-      <label>🎯 镜头切换点（自动检测后可手改）:</label>
-      <input type="text" id="timepoints" placeholder="示例: 0-4.2, 4.2-18.5, 18.5-108（最后一段自动补到视频末尾）">
+      <label>🎯 BGM分段时间点（自动检测后可手改）:</label>
+      <input type="text" id="timepoints" placeholder="示例: 0-22.5, 22.5-108（BGM切换点，不是每个镜头都切）">
     </div>
     <button id="analyzeBtn" disabled>🔍 分析并自动选曲</button>
     <div class="fmt-row">
@@ -135,6 +137,7 @@ let actx = null;
 let VIDEO_DUR = 0;
 
 function getCtx() { if (!actx) actx = new (window.AudioContext||window.webkitAudioContext)(); return actx; }
+function yieldUI() { return new Promise(r=>setTimeout(r,0)); }
 
 function stopPreview() {
   if (curAudio) { try { curAudio.stop(); } catch(e){} curAudio = null; }
@@ -298,7 +301,7 @@ document.getElementById("video").onchange = async (e) => {
   document.getElementById("detectBtn").disabled = false;
 };
 
-// ===== 自动镜头切换检测：本地抽帧 + 帧差 =====
+// ===== 自动镜头切换检测：本地抽帧 + 帧差（调粗阈值） =====
 async function detectScenes(file, onProgress) {
   return new Promise((resolve) => {
     const video = document.createElement("video");
@@ -310,9 +313,9 @@ async function detectScenes(file, onProgress) {
     canvas.width = W; canvas.height = H;
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
-    const STEP = 0.4; // 每0.4秒抽一帧
-    const THRESHOLD = 22; // MSE阈值（0-255尺度），越大越不敏感
-    const MIN_GAP = 1.5; // 两次切换最小间隔秒数
+    const STEP = 0.6;       // 0.6秒抽一帧
+    const THRESHOLD = 38;    // 提高阈值，减少误切
+    const MIN_GAP = 3.0;     // 两次切换最小间隔3秒
 
     video.onloadedmetadata = async () => {
       const dur = video.duration;
@@ -353,6 +356,27 @@ async function detectScenes(file, onProgress) {
   });
 }
 
+// 合并短段：相邻两段加起来<minTotal秒就合并；目标段数在5-15之间
+function mergeShortSegments(cuts, totalDur) {
+  // cuts是时间点数组[0, t1, t2, ..., dur]
+  let pts = [...cuts];
+  const MIN_SEG = 4.0;     // 单段最短4秒
+  const MAX_SEGS = 15;     // 最多15段
+  // 反复合并最短段
+  while (pts.length > 2) {
+    // 找最短段
+    let shortestIdx = 1, shortestLen = Infinity;
+    for (let i=1;i<pts.length;i++) {
+      const len = pts[i] - pts[i-1];
+      if (len < shortestLen) { shortestLen = len; shortestIdx = i; }
+    }
+    if (shortestLen >= MIN_SEG && pts.length - 1 <= MAX_SEGS) break;
+    // 合并：删除这个点（和前一段合并）
+    pts.splice(shortestIdx, 1);
+  }
+  return pts;
+}
+
 document.getElementById("detectBtn").onclick = async () => {
   const vf = document.getElementById("video").files[0];
   if (!vf) { alert("先选视频"); return; }
@@ -360,15 +384,20 @@ document.getElementById("detectBtn").onclick = async () => {
   btn.disabled = true; btn.textContent = "🎬 检测中...";
   const bar = document.getElementById("pbar");
   try {
-    const cuts = await detectScenes(vf, (p, t) => {
-      setProgress(bar, Math.round(p*100), `抽帧分析 ${t.toFixed(1)}s`);
+    const rawCuts = await detectScenes(vf, (p, t) => {
+      setProgress(bar, Math.round(p*90), `抽帧分析 ${t.toFixed(1)}s`);
     });
+    setProgress(bar, 95, "合并短段...");
+    await yieldUI();
+    const merged = mergeShortSegments(rawCuts, VIDEO_DUR);
     const segs = [];
-    for (let i=0;i<cuts.length-1;i++) segs.push(`${cuts[i].toFixed(1)}-${cuts[i+1].toFixed(1)}`);
+    for (let i=0;i<merged.length-1;i++) segs.push(`${merged[i].toFixed(1)}-${merged[i+1].toFixed(1)}`);
     document.getElementById("timepoints").value = segs.join(", ");
-    document.getElementById("status").textContent = `✅ 检测到 ${cuts.length-1} 个镜头段，已自动填入。可手改后点【分析并自动选曲】`;
+    document.getElementById("mergeInfo").textContent = `原始${rawCuts.length-1}段 → 合并后${merged.length-1}段（单段≥4秒，最多15段）`;
+    document.getElementById("status").textContent = `✅ 检测到 ${merged.length-1} 个BGM段，已自动填入。可手改后点【分析并自动选曲】`;
     btn.textContent = "🎬 重新检测";
     btn.disabled = false;
+    setProgress(bar, 100, "完成");
   } catch(e) {
     alert("检测失败："+e.message);
     btn.disabled = false; btn.textContent = "🎬 自动检测镜头切换点";
@@ -392,13 +421,10 @@ document.getElementById("analyzeBtn").onclick = async () => {
   const tpStr = document.getElementById("timepoints").value.trim();
   let timeSegs = tpStr ? parseTimepoints(tpStr, dur) : null;
 
-  // 构造分段
   let segDefs = [];
   if (timeSegs && timeSegs.length) {
-    // 按时间比例把剧本文本分配到每个镜头段
     for (let i=0;i<timeSegs.length;i++) {
       const s = timeSegs[i].start, e = timeSegs[i].end;
-      // 找对应时间比例的剧本场：把整个剧本平均分给所有镜头段
       const ratio = scenes.length ? i / Math.max(1, timeSegs.length - 1) : 0;
       const scIdx = Math.min(scenes.length - 1, Math.floor(ratio * scenes.length));
       const sc = scenes[Math.max(0, scIdx)] || {id: `seg${i+1}`, text: script};
@@ -421,6 +447,7 @@ document.getElementById("analyzeBtn").onclick = async () => {
     const segDur = s.end - s.start;
     const { mood, query } = analyzeMood(s.text);
     setProgress(bar, 10 + Math.round((i/n)*85), `段${i+1} [${mood}] ${s.start.toFixed(0)}-${s.end.toFixed(0)}s 搜曲中 (${i+1}/${n})`);
+    await yieldUI();
     const q = await embedText(query);
     const qn = norm(q);
     let scores = EMB.filter(e => e.voc !== "yes" && SONG_MAP[e.fn.toLowerCase()] && !usedSongs.has(e.fn))
@@ -533,7 +560,8 @@ function sliceBuffer(buf, off, dur) {
   return out;
 }
 
-function crossfadeConcat(bufs, overlap=2.0) {
+// async版crossfade，每段让出主线程
+async function crossfadeConcatAsync(bufs, overlap=2.0) {
   if (bufs.length===0) return null;
   if (bufs.length===1) return bufs[0];
   const ctx = getCtx();
@@ -559,6 +587,7 @@ function crossfadeConcat(bufs, overlap=2.0) {
       for (let j=bStart;j<od.length;j++) wd[rd.length - ovLen + (j-bStart)] = od[j];
     }
     result = out;
+    await yieldUI();
   }
   return result;
 }
@@ -580,9 +609,10 @@ async function buildSegmentBuffer(seg, neededDur) {
       filled += piece.duration;
       used.add(c.fn);
     } catch(e) { console.warn("decode fail", c.fn, e); }
+    await yieldUI();
   }
   if (!pieces.length) return null;
-  return crossfadeConcat(pieces, 1.5);
+  return crossfadeConcatAsync(pieces, 1.5);
 }
 
 function bufferToMp3(buf, kbps=192) {
@@ -649,13 +679,14 @@ document.getElementById("exportAllBtn").onclick = async () => {
   const bufs = [];
   for (let i=0;i<STATE.segments.length;i++) {
     const s = STATE.segments[i];
-    setProgress(bar, Math.round((i/STATE.segments.length)*80), `构建段${i+1}（不够自动接下一首）`);
+    setProgress(bar, Math.round((i/STATE.segments.length)*80), `构建段${i+1}/${STATE.segments.length}（不够自动接下一首）`);
     const segBuf = await buildSegmentBuffer(s, s.srcDur);
     if (segBuf) bufs.push(segBuf);
+    await yieldUI();
   }
   setProgress(bar, 88, "crossfade拼接...");
-  await new Promise(r=>setTimeout(r,100));
-  const mixed = crossfadeConcat(bufs, 2.0);
+  await yieldUI();
+  const mixed = await crossfadeConcatAsync(bufs, 2.0);
   applyFade(mixed, 2.0, 2.0);
   let blob, ext, desc;
   if (EXPORT_FMT === "mp3") {
