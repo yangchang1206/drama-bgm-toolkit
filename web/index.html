@@ -49,6 +49,9 @@ input[type=range] { width: 100%; margin-top: 6px; }
 .fmt-btns { display:flex; gap:6px; flex:1; }
 .fmt-btn { flex:1; padding:8px; border:2px solid #ddd; background:#f9fafb; color:#666; border-radius:6px; cursor:pointer; font-size:13px; margin-top:0; }
 .fmt-btn.on { border-color:#4f46e5; background:#eef2ff; color:#4338ca; font-weight:bold; }
+.tp-row { margin-top:8px; font-size:12px; color:#666; }
+.tp-row input { margin-top:4px; font-family:Consolas,monospace; font-size:12px; }
+.video-info { font-size:12px; color:#059669; margin-top:4px; }
 @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -87,6 +90,11 @@ input[type=range] { width: 100%; margin-top: 6px; }
     <h3>② 剧本 + 视频</h3>
     <textarea id="script" placeholder="粘贴整集剧本（含 35-1、35-2 等场号）"></textarea>
     <input type="file" id="video" accept="video/*" style="margin-top:8px;">
+    <div id="videoInfo" class="video-info">未选视频</div>
+    <div class="tp-row">
+      <label>🎯 镜头切换点（可选，从剪映里看真实转场秒数）:</label>
+      <input type="text" id="timepoints" placeholder="留空=按剧本场号均分；填示例: 0-42, 42-108（最后一段自动补到视频末尾）">
+    </div>
     <button id="analyzeBtn" disabled>🔍 分析并自动选曲</button>
     <div class="fmt-row">
       <label>导出格式:</label>
@@ -256,6 +264,33 @@ function analyzeMood(text) {
   return { mood, query };
 }
 
+function parseTimepoints(str, totalDur) {
+  // "0-42, 42-108" -> [{start:0,end:42},{start:42,end:108}]
+  // 最后一段 end 自动补到 totalDur
+  const parts = str.split(/[,，;；]/).map(s=>s.trim()).filter(Boolean);
+  const segs = [];
+  for (const p of parts) {
+    const m = p.match(/(\d+(?:\.\d+)?)\s*[-–~]\s*(\d+(?:\.\d+)?)/);
+    if (!m) continue;
+    segs.push({ start: parseFloat(m[1]), end: parseFloat(m[2]) });
+  }
+  if (!segs.length) return null;
+  if (segs[segs.length-1].end < totalDur - 1) segs[segs.length-1].end = totalDur;
+  if (segs[0].start > 0) segs[0].start = 0;
+  return segs;
+}
+
+function probeDuration(file) {
+  return new Promise(res => { const v = document.createElement("video"); v.preload="metadata"; v.onloadedmetadata=()=>res(v.duration); v.src=URL.createObjectURL(file); });
+}
+
+document.getElementById("video").onchange = async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const d = await probeDuration(f);
+  document.getElementById("videoInfo").textContent = `✅ 视频时长: ${d.toFixed(1)} 秒（${(d/60).toFixed(1)} 分钟）`;
+};
+
 document.getElementById("analyzeBtn").onclick = async () => {
   if (!LIB_READY) { alert("请先点【分析音乐库】"); return; }
   const script = document.getElementById("script").value;
@@ -266,28 +301,49 @@ document.getElementById("analyzeBtn").onclick = async () => {
   setProgress(bar, 5, "探测视频时长");
   const dur = await probeDuration(vf);
   STATE.duration = dur;
+  document.getElementById("videoInfo").textContent = `✅ 视频时长: ${dur.toFixed(1)} 秒`;
+
   const scenes = parseScenes(script);
-  const n = scenes.length || 1;
-  const segLen = dur / n;
+  const tpStr = document.getElementById("timepoints").value.trim();
+  let timeSegs = tpStr ? parseTimepoints(tpStr, dur) : null;
+
+  // 构造分段：timeSegs 优先；否则按剧本场号均分
+  let segDefs = [];
+  if (timeSegs && timeSegs.length) {
+    for (let i=0;i<timeSegs.length;i++) {
+      const sc = scenes[Math.min(i, scenes.length-1)] || {id: `seg${i+1}`, text: script};
+      segDefs.push({ id: sc.id, start: timeSegs[i].start, end: timeSegs[i].end, text: sc.text });
+    }
+  } else {
+    const n = scenes.length || 1;
+    const segLen = dur / n;
+    for (let i=0;i<n;i++) {
+      segDefs.push({ id: scenes[i].id, start: i*segLen, end: (i+1)*segLen, text: scenes[i].text });
+    }
+  }
+
+  const n = segDefs.length;
   STATE.segments = [];
   STATE.cur = 0;
   const usedSongs = new Set();
-  for (let i=0;i<scenes.length;i++) {
-    const { mood, query } = analyzeMood(scenes[i].text);
-    setProgress(bar, 10 + Math.round((i/n)*85), `场${scenes[i].id} [${mood}] 搜曲中 (${i+1}/${n})`);
+  for (let i=0;i<segDefs.length;i++) {
+    const s = segDefs[i];
+    const segDur = s.end - s.start;
+    const { mood, query } = analyzeMood(s.text);
+    setProgress(bar, 10 + Math.round((i/n)*85), `场${s.id} [${mood}] ${s.start.toFixed(0)}-${s.end.toFixed(0)}s 搜曲中 (${i+1}/${n})`);
     const q = await embedText(query);
     const qn = norm(q);
     let scores = EMB.filter(e => e.voc !== "yes" && SONG_MAP[e.fn.toLowerCase()] && !usedSongs.has(e.fn))
-      .map(e => { const en = norm(decodeVec(e.v)); let s=0; for(let j=0;j<qn.length;j++) s+=qn[j]*en[j]; return {sim:s, fn:e.fn}; });
+      .map(e => { const en = norm(decodeVec(e.v)); let sc=0; for(let j=0;j<qn.length;j++) sc+=qn[j]*en[j]; return {sim:sc, fn:e.fn}; });
     scores.sort((a,b)=>b.sim-a.sim);
     const top = scores.slice(0,10);
     if (top.length) usedSongs.add(top[0].fn);
-    STATE.segments.push({ id: scenes[i].id, timeStart: i*segLen, timeEnd: (i+1)*segLen, mood, query, candidates: top, track: 0, srcStart: 2, srcDur: segLen+2 });
+    STATE.segments.push({ id: s.id, timeStart: s.start, timeEnd: s.end, mood, query, candidates: top, track: 0, srcStart: 2, srcDur: segDur+1.5 });
   }
   setProgress(bar, 100, "完成");
   renderSegList();
   renderDetail();
-  st.textContent = `✅ 完成！共${n}段，视频${dur.toFixed(1)}秒。点③里的段可切换试听，最后导出。`;
+  st.textContent = `✅ 完成！共${n}段，视频${dur.toFixed(1)}秒。${timeSegs?'（按你填的镜头切换点对齐）':'（按剧本场号均分，可填镜头切换点更准）'}点③里的段可切换试听。`;
   document.getElementById("exportAllBtn").disabled = false;
 };
 
@@ -302,15 +358,12 @@ function parseScenes(text) {
   }
   if (cur) scenes.push(cur); return scenes;
 }
-function probeDuration(file) {
-  return new Promise(res => { const v = document.createElement("video"); v.preload="metadata"; v.onloadedmetadata=()=>res(v.duration); v.src=URL.createObjectURL(file); });
-}
 function renderSegList() {
   const el = document.getElementById("segList"); el.innerHTML = "";
   STATE.segments.forEach((s,i) => {
     const d = document.createElement("div");
     d.className = "seg" + (i===STATE.cur?" active":"");
-    d.innerHTML = `<b>${s.id}</b> <span class="mood">${s.mood}</span><br><span style="color:#666;font-size:11px;">${s.candidates[s.track]?.fn?.slice(0,35)||"无"}</span>`;
+    d.innerHTML = `<b>${s.id}</b> <span class="mood">${s.mood}</span><br><span style="color:#666;font-size:11px;">${s.timeStart.toFixed(0)}-${s.timeEnd.toFixed(0)}s · ${s.candidates[s.track]?.fn?.slice(0,30)||"无"}</span>`;
     d.onclick = () => { STATE.cur = i; stopPreview(); renderSegList(); renderDetail(); };
     el.appendChild(d);
   });
@@ -323,6 +376,7 @@ async function renderDetail() {
   if (!s.candidates[s.track]) { el.innerHTML = "<div style='color:#999;font-size:12px;'>该段无候选曲</div>"; return; }
   const cur = s.candidates[s.track];
   el.innerHTML = `<b>段 ${s.id}</b> <span class="mood">${s.mood}</span><br>
+    <span style="color:#666;font-size:11px;">视频区间: ${s.timeStart.toFixed(1)}s - ${s.timeEnd.toFixed(1)}s（共${(s.timeEnd-s.timeStart).toFixed(1)}s）</span><br>
     <div class="query-box">🔍 ${s.query}</div>
     <div class="song sel">${cur.fn} (相似度${cur.sim.toFixed(2)})</div>
     <div style="margin-top:8px;">
@@ -526,11 +580,11 @@ document.getElementById("exportAllBtn").onclick = async () => {
     const w = await OUT_DIR.getFileHandle(fname, {create:true});
     const w2 = await w.createWritable();
     await w2.write(blob); await w2.close();
-    st.textContent = `✅ 已导出到 ${OUT_DIR.name}/${fname}（${mixed.duration.toFixed(1)}秒）`;
+    st.textContent = `✅ 已导出到 ${OUT_DIR.name}/${fname}（${mixed.duration.toFixed(1)}秒，目标视频${STATE.duration.toFixed(1)}秒）`;
   } else {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob); a.download = fname; a.click();
-    st.textContent = `✅ 已导出 ${fname}（${mixed.duration.toFixed(1)}秒，${desc}）`;
+    st.textContent = `✅ 已导出 ${fname}（${mixed.duration.toFixed(1)}秒，目标视频${STATE.duration.toFixed(1)}秒，${desc}）`;
   }
   setProgress(bar, 100, "完成");
 };
