@@ -35,9 +35,12 @@ input[type=range] { width: 100%; margin-top: 6px; }
 .pbar-wrap { margin-top: 10px; background: #e5e7eb; border-radius: 6px; overflow: hidden; height: 18px; display:none; }
 .pbar { height: 100%; background: linear-gradient(90deg,#4f46e5,#7c3aed); color:#fff; font-size:11px; line-height:18px; text-align:center; transition: width .3s; white-space:nowrap; }
 .musiclib { max-height: 300px; overflow-y: auto; margin-top: 8px; }
-.api-box { background:#fff; border-radius:8px; padding:10px 16px; margin:0 16px 12px; display:flex; gap:8px; align-items:center; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+.api-box { background:#fff; border-radius:8px; padding:10px 16px; margin:0 16px 12px; display:flex; gap:8px; align-items:center; box-shadow:0 1px 3px rgba(0,0,0,.08); flex-wrap:wrap; }
 .api-box label { font-size:12px; color:#666; white-space:nowrap; }
-.api-box input { flex:1; font-size:12px; }
+.api-box input { flex:1; font-size:12px; min-width:200px; }
+.api-msg { font-size:12px; margin-left:8px; }
+.api-msg.ok { color:#059669; }
+.api-msg.err { color:#dc2626; }
 @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -49,6 +52,8 @@ input[type=range] { width: 100%; margin-top: 6px; }
   <label>🔑 阿里云API Key:</label>
   <input type="password" id="apiKey" placeholder="sk-... （存在浏览器本地，不上传）">
   <button id="saveKeyBtn" class="secondary" style="margin-top:0;">保存</button>
+  <button id="testKeyBtn" class="teal" style="margin-top:0;">🔌 测试连接</button>
+  <span id="apiMsg" class="api-msg"></span>
 </div>
 
 <div style="padding:0 16px 12px; display:grid; grid-template-columns:1fr 1fr; gap:12px;">
@@ -112,7 +117,30 @@ document.getElementById("apiKey").value = API_KEY;
 document.getElementById("saveKeyBtn").onclick = () => {
   API_KEY = document.getElementById("apiKey").value.trim();
   localStorage.setItem("dashscope_key", API_KEY);
-  alert("已保存");
+  document.getElementById("apiMsg").textContent = "✅ 已保存";
+  document.getElementById("apiMsg").className = "api-msg ok";
+};
+
+document.getElementById("testKeyBtn").onclick = async () => {
+  const msg = document.getElementById("apiMsg");
+  const key = document.getElementById("apiKey").value.trim();
+  if (!key) { msg.textContent = "⚠️ 请先填Key"; msg.className = "api-msg err"; return; }
+  msg.textContent = "⏳ 测试中..."; msg.className = "api-msg";
+  try {
+    const r = await fetch("https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "text-embedding-v3", input: ["test"], dimensions: 1024, encoding_format: "float" })
+    });
+    if (!r.ok) { const e = await r.json().catch(()=>({error:{message:r.statusText}})); throw new Error(e.error?.message || r.status); }
+    const j = await r.json();
+    const dim = j.data?.[0]?.embedding?.length;
+    msg.textContent = `✅ 连接成功（向量维度 ${dim}）`;
+    msg.className = "api-msg ok";
+  } catch(e) {
+    msg.textContent = `❌ 失败：${e.message}`;
+    msg.className = "api-msg err";
+  }
 };
 
 function setProgress(el, pct, text) {
@@ -174,7 +202,6 @@ document.getElementById("pickOutBtn").onclick = async () => {
   } catch(e) {}
 };
 
-// 调阿里 OpenAI 兼容 embedding API
 async function embedText(text) {
   if (!API_KEY) { alert("请先填阿里云API Key"); throw new Error("no key"); }
   const r = await fetch("https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings", {
@@ -186,7 +213,6 @@ async function embedText(text) {
   return j.data[0].embedding;
 }
 
-// 解码 int8 base64 向量
 function decodeVec(b64) {
   const bin = atob(b64);
   const arr = new Float32Array(bin.length);
