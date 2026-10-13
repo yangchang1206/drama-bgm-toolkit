@@ -27,7 +27,8 @@ button.purple { background: #7c3aed; }
 .seg.active { border-color: #4f46e5; background: #eef2ff; }
 .mood { display: inline-block; background: #e0e7ff; color: #4338ca; padding: 1px 6px; border-radius: 3px; font-size: 11px; margin-left: 4px; }
 .status { font-size: 12px; color: #666; margin-top: 8px; white-space: pre-wrap; }
-.song { font-size: 12px; padding: 4px; background: #f9fafb; border-radius: 3px; margin-bottom: 3px; cursor: pointer; }
+.status.err { color: #dc2626; background: #fef2f2; padding: 6px; border-radius: 4px; }
+.song { font-size: 12px; padding: 4px; background: #f9fafb; border-radius: 3px; margin-bottom: 3px; cursor: pointer; word-break: break-all; }
 .song.sel { background: #dbeafe; }
 .fileinfo { font-size: 12px; color: #059669; margin-top: 4px; }
 .banner { background: #fef3c7; padding: 8px; border-radius: 4px; font-size: 12px; margin-bottom: 8px; color: #92400e; }
@@ -44,7 +45,7 @@ input[type=range] { width: 100%; margin-top: 6px; }
 .api-msg.ok { color:#059669; }
 .api-msg.err { color:#dc2626; }
 .export-btn { width:100%; padding:12px; font-size:15px; margin-top:12px; background:#059669; }
-.query-box { background:#f0f9ff; border-left:3px solid #0284c7; padding:6px 8px; margin-top:6px; font-size:11px; color:#075985; }
+.query-box { background:#f0f9ff; border-left:3px solid #0284c7; padding:6px 8px; margin-top:6px; font-size:11px; color:#075985; word-break: break-all; }
 .fmt-row { display:flex; gap:8px; align-items:center; margin-top:10px; }
 .fmt-row label { font-size:12px; color:#666; white-space:nowrap; }
 .fmt-btns { display:flex; gap:6px; flex:1; }
@@ -139,18 +140,19 @@ let actx = null;
 let VIDEO_DUR = 0;
 let analyzeVideoEl = null;
 
-// 关键参数
-const CROSSFADE_SEC = 4.0;    // 段间crossfade 4秒（之前2秒太突兀）
+const CROSSFADE_SEC = 4.0;
 const FADE_IN = 2.0;
 const FADE_OUT = 3.0;
-const MERGE_SIM_THRESHOLD = 0.72; // 相邻段query相似度>此值则合并
-const MAX_MUSIC_SEGMENTS = 4;    // 最多换4次歌
+const MERGE_SIM_THRESHOLD = 0.72;
+const MAX_MUSIC_SEGMENTS = 4;
 
 function getCtx() { if (!actx) actx = new (window.AudioContext||window.webkitAudioContext)(); return actx; }
 function yieldUI() { return new Promise(r=>setTimeout(r,0)); }
+function esc(s) { return String(s==null?"":s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;',"'":"&#39;"}[c])); }
 
 function stopPreview() {
-  if (curAudio) { try { curAudio.stop(); } catch(e){} curAudio = null; }
+  try { if (curAudio) curAudio.stop(); } catch(e){}
+  curAudio = null;
   if (playTimer) { clearInterval(playTimer); playTimer = null; }
 }
 
@@ -198,7 +200,8 @@ function setProgress(el, pct, text) {
 }
 
 async function loadEmb() {
-  try { const r = await fetch("web_embeddings.json"); EMB = await r.json(); } catch(e) { console.error(e); }
+  try { const r = await fetch("web_embeddings.json"); EMB = await r.json(); console.log("emb loaded", EMB.length); }
+  catch(e) { console.error("emb load fail", e); }
 }
 loadEmb();
 
@@ -231,7 +234,7 @@ document.getElementById("analyzeLibBtn").onclick = async () => {
   setProgress(bar, 100, `完成：匹配 ${matched}/${EMB.filter(e=>e.voc!=='yes').length} 首纯器乐`);
   document.getElementById("status").textContent = `音乐库就绪：本地${n}首，可搜纯器乐${matched}首`;
   const lv = document.getElementById("libList");
-  lv.innerHTML = list.slice(0,50).map(f=>`<div class="song">🎵 ${f}</div>`).join("") + (list.length>50?`<div style="color:#888;font-size:11px;padding:4px;">...共${list.length}首</div>`:"");
+  lv.innerHTML = list.slice(0,50).map(f=>`<div class="song">🎵 ${esc(f)}</div>`).join("") + (list.length>50?`<div style="color:#888;font-size:11px;padding:4px;">...共${list.length}首</div>`:"");
   LIB_READY = true;
   document.getElementById("analyzeBtn").disabled = false;
 };
@@ -241,13 +244,14 @@ document.getElementById("pickOutBtn").onclick = async () => {
 };
 
 async function embedText(text) {
-  if (!API_KEY) { alert("请先填阿里云API Key"); throw new Error("no key"); }
+  if (!API_KEY) throw new Error("no key");
   const r = await fetch("https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings", {
     method: "POST",
     headers: { "Authorization": `Bearer ${API_KEY}`, "Content-Type": "application/json" },
     body: JSON.stringify({ model: "text-embedding-v3", input: [text], dimensions: 1024, encoding_format: "float" })
   });
   const j = await r.json();
+  if (!j.data || !j.data[0]) throw new Error("embedding bad response");
   return j.data[0].embedding;
 }
 
@@ -439,135 +443,6 @@ document.getElementById("detectBtn").onclick = async () => {
   }
 };
 
-document.getElementById("analyzeBtn").onclick = async () => {
-  if (!LIB_READY) { alert("请先点【分析音乐库】"); return; }
-  const script = document.getElementById("script").value;
-  const vf = document.getElementById("video").files[0];
-  if (!script || !vf) { alert("请填剧本+选视频"); return; }
-  if (!API_KEY) { alert("请先填阿里云API Key"); return; }
-  const st = document.getElementById("status");
-  const bar = document.getElementById("pbar");
-  setProgress(bar, 3, "准备视频...");
-
-  if (!analyzeVideoEl || !analyzeVideoEl.videoWidth) {
-    if (analyzeVideoEl) analyzeVideoEl.remove();
-    analyzeVideoEl = document.createElement("video");
-    analyzeVideoEl.muted = true; analyzeVideoEl.playsInline = true;
-    analyzeVideoEl.style.display = "none";
-    document.body.appendChild(analyzeVideoEl);
-    analyzeVideoEl.src = URL.createObjectURL(vf);
-    await new Promise(r => { analyzeVideoEl.onloadedmetadata = r; });
-  }
-
-  const dur = analyzeVideoEl.duration;
-  STATE.duration = dur;
-  VIDEO_DUR = dur;
-  document.getElementById("videoInfo").textContent = `✅ 视频时长: ${dur.toFixed(1)} 秒`;
-
-  const scenes = parseScenes(script);
-  const tpStr = document.getElementById("timepoints").value.trim();
-  let timeSegs = tpStr ? parseTimepoints(tpStr, dur) : null;
-
-  let segDefs = [];
-  if (timeSegs && timeSegs.length) {
-    for (let i=0;i<timeSegs.length;i++) {
-      const s = timeSegs[i];
-      const ratio = scenes.length ? i / Math.max(1, timeSegs.length-1) : 0;
-      const scIdx = Math.min(scenes.length-1, Math.floor(ratio*scenes.length));
-      const sc = scenes[Math.max(0,scIdx)] || {id:`seg${i+1}`, text:script};
-      segDefs.push({ id: sc.id, start: s.start, end: s.end, text: sc.text });
-    }
-  } else {
-    const n = scenes.length || 1;
-    const segLen = dur/n;
-    for (let i=0;i<n;i++) segDefs.push({id:scenes[i].id, start:i*segLen, end:(i+1)*segLen, text:scenes[i].text});
-  }
-
-  // Step 1: 每段抽帧+AI看图拿query+embedding
-  const n = segDefs.length;
-  const rawSegs = [];
-  const usedSongs = new Set();
-  for (let i=0;i<n;i++) {
-    const s = segDefs[i];
-    const segDur = s.end - s.start;
-    const mid = (s.start+s.end)/2;
-    let query, fromAI = false;
-    try {
-      setProgress(bar, 5 + Math.round((i/n)*45), `段${i+1}/${n} AI看图 (${mid.toFixed(1)}s)`);
-      await yieldUI();
-      const frame = await grabFrame(analyzeVideoEl, mid);
-      query = await aiMoodQuery(frame, s.text);
-      fromAI = true;
-    } catch(e) {
-      const fb = analyzeMood(s.text);
-      query = fb.query;
-    }
-    const qVec = await embedText(query);
-    rawSegs.push({ id: s.id, start: s.start, end: s.end, text: s.text, query, qVec, fromAI, segDur });
-  }
-
-  // Step 2: 情绪相似度二次合并——相邻段cosine>阈值就合并
-  setProgress(bar, 55, "情绪相似段合并...");
-  await yieldUI();
-  function cos(a,b){ let d=0,na=0,nb=0; for(let i=0;i<a.length;i++){ d+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; } return d/(Math.sqrt(na)*Math.sqrt(nb)||1); }
-
-  const mergedGroups = [];
-  let curGroup = [rawSegs[0]];
-  for (let i=1;i<rawSegs.length;i++) {
-    const sim = cos(curGroup[curGroup.length-1].qVec, rawSegs[i].qVec);
-    // 如果合并后总数<=MAX_MUSIC_SEGMENTS 且相似度够高，就合并
-    if (sim > MERGE_SIM_THRESHOLD && (mergedGroups.length + curGroup.length) <= MAX_MUSIC_SEGMENTS) {
-      curGroup.push(rawSegs[i]);
-    } else {
-      mergedGroups.push(curGroup);
-      curGroup = [rawSegs[i]];
-    }
-  }
-  mergedGroups.push(curGroup);
-
-  // Step 3: 每个合并后的组用平均query搜曲
-  STATE.segments = [];
-  for (let g=0; g<mergedGroups.length; g++) {
-    const grp = mergedGroups[g];
-    const gStart = grp[0].start;
-    const gEnd = grp[grp.length-1].end;
-    const gDur = gEnd - gStart;
-    // 平均query向量
-    const avgVec = new Float32Array(rawSegs[0].qVec.length);
-    for (const s of grp) for (let i=0;i<avgVec.length;i++) avgVec[i] += s.qVec[i];
-    for (let i=0;i<avgVec.length;i++) avgVec[i] /= grp.length;
-    // 拼接query文本
-    const gQuery = grp.map(s=>s.query).join(" / ");
-
-    setProgress(bar, 60 + Math.round((g/mergedGroups.length)*30), `选曲组${g+1}/${mergedGroups.length}（覆盖${gStart.toFixed(0)}-${gEnd.toFixed(0)}s）`);
-    await yieldUI();
-
-    const qn = norm(Array.from(avgVec));
-    let scores = EMB.filter(e => e.voc !== "yes" && SONG_MAP[e.fn.toLowerCase()] && !usedSongs.has(e.fn))
-      .map(e => { const en = norm(decodeVec(e.v)); let sc=0; for(let j=0;j<qn.length;j++) sc+=qn[j]*en[j]; return {sim:sc, fn:e.fn}; });
-    scores.sort((a,b)=>b.sim-a.sim);
-    const top = scores.slice(0,10);
-    if (top.length) usedSongs.add(top[0].fn);
-
-    STATE.segments.push({
-      id: grp[0].id + (grp.length>1?`+${grp.length-1}`:""),
-      timeStart: gStart, timeEnd: gEnd,
-      mood: grp[0].fromAI ? "AI" : "规则",
-      query: gQuery,
-      fromAI: grp[0].fromAI,
-      mergedCount: grp.length,
-      candidates: top, track: 0,
-      srcStart: 2, srcDur: gDur + 2.0
-    });
-  }
-
-  setProgress(bar, 95, "渲染...");
-  renderSegList();
-  renderDetail();
-  st.textContent = `✅ 完成！镜头${n}段 → 情绪合并后${STATE.segments.length}段BGM（换歌${STATE.segments.length-1}次，crossfade ${CROSSFADE_SEC}s）。视频${dur.toFixed(1)}秒。`;
-  document.getElementById("exportAllBtn").disabled = false;
-};
-
 function norm(a) { let s=0; for (const x of a) s+=x*x; s=Math.sqrt(s)||1; return a.map(x=>x/s); }
 function parseScenes(text) {
   const lines = text.split("\n"); const scenes = []; let cur = null;
@@ -579,36 +454,44 @@ function parseScenes(text) {
   }
   if (cur) scenes.push(cur); return scenes;
 }
+
 function renderSegList() {
-  const el = document.getElementById("segList"); el.innerHTML = "";
+  const el = document.getElementById("segList");
+  el.innerHTML = "";
+  if (!STATE.segments.length) { el.innerHTML = '<div style="color:#999;font-size:12px;">无分段</div>'; return; }
   STATE.segments.forEach((s,i) => {
     const d = document.createElement("div");
     d.className = "seg" + (i===STATE.cur?" active":"");
     const tags = [];
     if (s.fromAI) tags.push('<span class="ai-tag">AI</span>');
     if (s.mergedCount > 1) tags.push(`<span class="merge-tag">合并${s.mergedCount}镜头</span>`);
-    d.innerHTML = `<b>${s.id}</b> <span class="mood">${s.mood}</span> ${tags.join("")}<br><span style="color:#666;font-size:11px;">${s.timeStart.toFixed(0)}-${s.timeEnd.toFixed(0)}s · ${s.candidates[s.track]?.fn?.slice(0,28)||"无"}</span>`;
+    const songName = (s.candidates && s.candidates[s.track]) ? s.candidates[s.track].fn : "无候选";
+    d.innerHTML = `<b>${esc(s.id)}</b> <span class="mood">${esc(s.mood)}</span> ${tags.join("")}<br><span style="color:#666;font-size:11px;">${(s.timeStart||0).toFixed(0)}-${(s.timeEnd||0).toFixed(0)}s · ${esc(songName.slice(0,28))}</span>`;
     d.onclick = () => { STATE.cur = i; stopPreview(); renderSegList(); renderDetail(); };
     el.appendChild(d);
   });
 }
 
 async function renderDetail() {
-  const s = STATE.segments[STATE.cur]; if (!s) return;
-  stopPreview();
+  const s = STATE.segments[STATE.cur];
   const el = document.getElementById("detail");
-  if (!s.candidates[s.track]) { el.innerHTML = "<div style='color:#999;font-size:12px;'>该段无候选曲</div>"; return; }
-  const cur = s.candidates[s.track];
+  if (!s) { el.innerHTML = '<div style="color:#aaa;font-size:12px;">无分段</div>'; return; }
+  stopPreview();
+  const cand = (s.candidates && s.candidates[s.track]) ? s.candidates[s.track] : null;
+  if (!cand) {
+    el.innerHTML = `<div style="color:#999;font-size:12px;">该段无候选曲（本地音乐库与向量库未匹配）<br><br>请检查：<br>1. 音乐文件夹是否选对<br>2. 是否点了【分析音乐库】<br>3. 歌曲文件名是否和向量库一致</div>`;
+    return;
+  }
   const tags = [];
   if (s.fromAI) tags.push('<span class="ai-tag">AI看图生成</span>');
   if (s.mergedCount > 1) tags.push(`<span class="merge-tag">合并了${s.mergedCount}个镜头段</span>`);
-  el.innerHTML = `<b>段 ${s.id}</b> <span class="mood">${s.mood}</span> ${tags.join("")}<br>
-    <span style="color:#666;font-size:11px;">视频区间: ${s.timeStart.toFixed(1)}s - ${s.timeEnd.toFixed(1)}s（共${(s.timeEnd-s.timeStart).toFixed(1)}s）</span><br>
-    <div class="query-box">🔍 query: ${s.query}</div>
-    <div class="song sel">${cur.fn} (相似度${cur.sim.toFixed(2)})</div>
+  el.innerHTML = `<b>段 ${esc(s.id)}</b> <span class="mood">${esc(s.mood)}</span> ${tags.join("")}<br>
+    <span style="color:#666;font-size:11px;">视频区间: ${(s.timeStart||0).toFixed(1)}s - ${(s.timeEnd||0).toFixed(1)}s（共${((s.timeEnd||0)-(s.timeStart||0)).toFixed(1)}s）</span><br>
+    <div class="query-box">🔍 query: ${esc(s.query||"")}</div>
+    <div class="song sel">${esc(cand.fn)} (相似度${(cand.sim||0).toFixed(2)})</div>
     <div style="margin-top:8px;">
-      <label style="font-size:12px;">素材起始: <input type="number" id="st" value="${s.srcStart.toFixed(1)}" step="0.5" style="width:70px;">秒</label>
-      <label style="font-size:12px;">素材时长: <input type="number" id="dur" value="${s.srcDur.toFixed(1)}" step="0.5" style="width:70px;">秒</label>
+      <label style="font-size:12px;">素材起始: <input type="number" id="st" value="${(s.srcStart||2).toFixed(1)}" step="0.5" style="width:70px;">秒</label>
+      <label style="font-size:12px;">素材时长: <input type="number" id="dur" value="${(s.srcDur||30).toFixed(1)}" step="0.5" style="width:70px;">秒</label>
     </div>
     <div id="cands" style="margin-top:8px;"></div>
     <button id="previewBtn">▶ 播放</button>
@@ -618,23 +501,24 @@ async function renderDetail() {
       <div class="time"><span id="curTime">0:00</span><span id="durTime">0:00</span></div>
     </div>`;
   const cands = document.getElementById("cands");
-  s.candidates.forEach((c,i) => {
+  (s.candidates||[]).forEach((c,i) => {
     const d = document.createElement("div");
     d.className = "song" + (i===s.track?" sel":"");
-    d.textContent = `[${i}] ${c.fn.slice(0,40)} (${c.sim.toFixed(2)})`;
+    d.textContent = `[${i}] ${c.fn.slice(0,40)} (${(c.sim||0).toFixed(2)})`;
     d.onclick = () => { s.track = i; stopPreview(); renderDetail(); };
     cands.appendChild(d);
   });
   document.getElementById("previewBtn").onclick = async () => {
     stopPreview();
-    s.srcStart = parseFloat(document.getElementById("st").value);
-    s.srcDur = parseFloat(document.getElementById("dur").value);
-    const fh = SONG_MAP[cur.fn.toLowerCase()];
-    if (!fh) { alert("找不到文件："+cur.fn); return; }
     try {
+      s.srcStart = parseFloat(document.getElementById("st").value) || 2;
+      s.srcDur = parseFloat(document.getElementById("dur").value) || 30;
+      const fh = SONG_MAP[cand.fn.toLowerCase()];
+      if (!fh) { alert("找不到文件："+cand.fn); return; }
       const buf = await decodeAudioFile(fh);
       const ctx = getCtx();
-      const off = s.srcStart, dur = Math.min(s.srcDur, buf.duration - off);
+      const off = s.srcStart;
+      const dur = Math.min(s.srcDur, buf.duration - off);
       const src = ctx.createBufferSource(); src.buffer = buf;
       const gain = ctx.createGain();
       src.connect(gain).connect(ctx.destination);
@@ -653,6 +537,130 @@ async function renderDetail() {
   };
   document.getElementById("pauseBtn").onclick = () => stopPreview();
 }
+
+document.getElementById("analyzeBtn").onclick = async () => {
+  if (!LIB_READY) { alert("请先点【分析音乐库】"); return; }
+  const script = document.getElementById("script").value;
+  const vf = document.getElementById("video").files[0];
+  if (!script || !vf) { alert("请填剧本+选视频"); return; }
+  if (!API_KEY) { alert("请先填阿里云API Key"); return; }
+  const st = document.getElementById("status");
+  const bar = document.getElementById("pbar");
+  st.className = "status";
+  try {
+    setProgress(bar, 3, "准备视频...");
+    if (!analyzeVideoEl || !analyzeVideoEl.videoWidth) {
+      if (analyzeVideoEl) analyzeVideoEl.remove();
+      analyzeVideoEl = document.createElement("video");
+      analyzeVideoEl.muted = true; analyzeVideoEl.playsInline = true;
+      analyzeVideoEl.style.display = "none";
+      document.body.appendChild(analyzeVideoEl);
+      analyzeVideoEl.src = URL.createObjectURL(vf);
+      await new Promise(r => { analyzeVideoEl.onloadedmetadata = r; });
+    }
+    const dur = analyzeVideoEl.duration;
+    STATE.duration = dur;
+    VIDEO_DUR = dur;
+    document.getElementById("videoInfo").textContent = `✅ 视频时长: ${dur.toFixed(1)} 秒`;
+
+    const scenes = parseScenes(script);
+    const tpStr = document.getElementById("timepoints").value.trim();
+    let timeSegs = tpStr ? parseTimepoints(tpStr, dur) : null;
+    let segDefs = [];
+    if (timeSegs && timeSegs.length) {
+      for (let i=0;i<timeSegs.length;i++) {
+        const s = timeSegs[i];
+        const ratio = scenes.length ? i / Math.max(1, timeSegs.length-1) : 0;
+        const scIdx = Math.min(scenes.length-1, Math.floor(ratio*scenes.length));
+        const sc = scenes[Math.max(0,scIdx)] || {id:`seg${i+1}`, text:script};
+        segDefs.push({ id: sc.id, start: s.start, end: s.end, text: sc.text });
+      }
+    } else {
+      const n = scenes.length || 1;
+      const segLen = dur/n;
+      for (let i=0;i<n;i++) segDefs.push({id:scenes[i]?.id||`seg${i+1}`, start:i*segLen, end:(i+1)*segLen, text:scenes[i]?.text||script});
+    }
+
+    const n = segDefs.length;
+    const rawSegs = [];
+    const usedSongs = new Set();
+    for (let i=0;i<n;i++) {
+      const s = segDefs[i];
+      const mid = (s.start+s.end)/2;
+      let query, fromAI = false;
+      try {
+        setProgress(bar, 5 + Math.round((i/n)*45), `段${i+1}/${n} AI看图 (${mid.toFixed(1)}s)`);
+        await yieldUI();
+        const frame = await grabFrame(analyzeVideoEl, mid);
+        query = await aiMoodQuery(frame, s.text);
+        fromAI = true;
+      } catch(e) {
+        console.warn("AI mood fail, fallback", e);
+        const fb = analyzeMood(s.text);
+        query = fb.query;
+      }
+      const qVec = await embedText(query);
+      rawSegs.push({ id: s.id, start: s.start, end: s.end, text: s.text, query, qVec, fromAI });
+    }
+
+    setProgress(bar, 55, "情绪相似段合并...");
+    await yieldUI();
+    function cos(a,b){ let d=0,na=0,nb=0; for(let i=0;i<a.length;i++){ d+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; } return d/(Math.sqrt(na)*Math.sqrt(nb)||1); }
+    const mergedGroups = [];
+    let curGroup = [rawSegs[0]];
+    for (let i=1;i<rawSegs.length;i++) {
+      const sim = cos(curGroup[curGroup.length-1].qVec, rawSegs[i].qVec);
+      if (sim > MERGE_SIM_THRESHOLD && (mergedGroups.length + curGroup.length) <= MAX_MUSIC_SEGMENTS) curGroup.push(rawSegs[i]);
+      else { mergedGroups.push(curGroup); curGroup = [rawSegs[i]]; }
+    }
+    mergedGroups.push(curGroup);
+
+    STATE.segments = [];
+    for (let g=0; g<mergedGroups.length; g++) {
+      const grp = mergedGroups[g];
+      const gStart = grp[0].start;
+      const gEnd = grp[grp.length-1].end;
+      const gDur = gEnd - gStart;
+      const avgVec = new Float32Array(rawSegs[0].qVec.length);
+      for (const s of grp) for (let i=0;i<avgVec.length;i++) avgVec[i] += s.qVec[i];
+      for (let i=0;i<avgVec.length;i++) avgVec[i] /= grp.length;
+      const gQuery = grp.map(s=>s.query).join(" / ");
+      setProgress(bar, 60 + Math.round((g/mergedGroups.length)*30), `选曲组${g+1}/${mergedGroups.length}（覆盖${gStart.toFixed(0)}-${gEnd.toFixed(0)}s）`);
+      await yieldUI();
+      const qn = norm(Array.from(avgVec));
+      let scores = EMB.filter(e => e.voc !== "yes" && SONG_MAP[e.fn.toLowerCase()] && !usedSongs.has(e.fn))
+        .map(e => { try { const en = norm(decodeVec(e.v)); let sc=0; for(let j=0;j<qn.length;j++) sc+=qn[j]*en[j]; return {sim:sc, fn:e.fn}; } catch(err){ return null; } })
+        .filter(Boolean);
+      scores.sort((a,b)=>b.sim-a.sim);
+      const top = scores.slice(0,10);
+      if (top.length) usedSongs.add(top[0].fn);
+      STATE.segments.push({
+        id: grp[0].id + (grp.length>1?`+${grp.length-1}`:""),
+        timeStart: gStart, timeEnd: gEnd,
+        mood: grp[0].fromAI ? "AI" : "规则",
+        query: gQuery,
+        fromAI: grp[0].fromAI,
+        mergedCount: grp.length,
+        candidates: top, track: 0,
+        srcStart: 2, srcDur: gDur + 2.0
+      });
+    }
+
+    setProgress(bar, 95, "渲染结果...");
+    await yieldUI();
+    renderSegList();
+    renderDetail();
+    st.textContent = `✅ 完成！镜头${n}段 → 情绪合并后${STATE.segments.length}段BGM（换歌${STATE.segments.length-1}次，crossfade ${CROSSFADE_SEC}s）。视频${dur.toFixed(1)}秒。`;
+    st.className = "status";
+    setProgress(bar, 100, "完成");
+    document.getElementById("exportAllBtn").disabled = false;
+  } catch(e) {
+    console.error(e);
+    st.textContent = `❌ 出错：${e.message}\n\n请按F12打开控制台截图发我。`;
+    st.className = "status err";
+    setProgress(bar, 100, "错误");
+  }
+};
 
 function sliceBuffer(buf, off, dur) {
   const ctx = getCtx();
@@ -782,38 +790,44 @@ document.getElementById("exportAllBtn").onclick = async () => {
   stopPreview();
   const bar = document.getElementById("pbar");
   const st = document.getElementById("status");
-  const bufs = [];
-  for (let i=0;i<STATE.segments.length;i++) {
-    const s = STATE.segments[i];
-    setProgress(bar, Math.round((i/STATE.segments.length)*80), `构建BGM段${i+1}/${STATE.segments.length}（${s.timeStart.toFixed(0)}-${s.timeEnd.toFixed(0)}s）`);
-    const segBuf = await buildSegmentBuffer(s, s.srcDur);
-    if (segBuf) bufs.push(segBuf);
+  try {
+    const bufs = [];
+    for (let i=0;i<STATE.segments.length;i++) {
+      const s = STATE.segments[i];
+      setProgress(bar, Math.round((i/STATE.segments.length)*80), `构建BGM段${i+1}/${STATE.segments.length}（${(s.timeStart||0).toFixed(0)}-${(s.timeEnd||0).toFixed(0)}s）`);
+      const segBuf = await buildSegmentBuffer(s, s.srcDur);
+      if (segBuf) bufs.push(segBuf);
+      await yieldUI();
+    }
+    setProgress(bar, 88, `crossfade ${CROSSFADE_SEC}s 拼接...`);
     await yieldUI();
+    const mixed = await crossfadeConcatAsync(bufs, CROSSFADE_SEC);
+    applyFade(mixed, FADE_IN, FADE_OUT);
+    let blob, ext, desc;
+    if (EXPORT_FMT === "mp3") {
+      setProgress(bar, 95, "编码MP3...");
+      blob = bufferToMp3(mixed, 192); ext = "mp3"; desc = "MP3 192kbps";
+    } else {
+      setProgress(bar, 95, "打包WAV...");
+      blob = bufferToWav(mixed); ext = "wav"; desc = "WAV无损";
+    }
+    const fname = `BGM_${STATE.duration.toFixed(0)}s.${ext}`;
+    if (OUT_DIR) {
+      const w = await OUT_DIR.getFileHandle(fname, {create:true});
+      const w2 = await w.createWritable();
+      await w2.write(blob); await w2.close();
+      st.textContent = `✅ 已导出到 ${OUT_DIR.name}/${fname}（${mixed.duration.toFixed(1)}秒，目标${STATE.duration.toFixed(1)}秒，${STATE.segments.length}段BGM）`;
+    } else {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob); a.download = fname; a.click();
+      st.textContent = `✅ 已导出 ${fname}（${mixed.duration.toFixed(1)}秒，目标${STATE.duration.toFixed(1)}秒，${STATE.segments.length}段BGM，${desc}）`;
+    }
+    setProgress(bar, 100, "完成");
+  } catch(e) {
+    console.error(e);
+    st.textContent = `❌ 导出失败：${e.message}`;
+    setProgress(bar, 100, "错误");
   }
-  setProgress(bar, 88, `crossfade ${CROSSFADE_SEC}s 拼接...`);
-  await yieldUI();
-  const mixed = await crossfadeConcatAsync(bufs, CROSSFADE_SEC);
-  applyFade(mixed, FADE_IN, FADE_OUT);
-  let blob, ext, desc;
-  if (EXPORT_FMT === "mp3") {
-    setProgress(bar, 95, "编码MP3...");
-    blob = bufferToMp3(mixed, 192); ext = "mp3"; desc = "MP3 192kbps";
-  } else {
-    setProgress(bar, 95, "打包WAV...");
-    blob = bufferToWav(mixed); ext = "wav"; desc = "WAV无损";
-  }
-  const fname = `BGM_${STATE.duration.toFixed(0)}s.${ext}`;
-  if (OUT_DIR) {
-    const w = await OUT_DIR.getFileHandle(fname, {create:true});
-    const w2 = await w.createWritable();
-    await w2.write(blob); await w2.close();
-    st.textContent = `✅ 已导出到 ${OUT_DIR.name}/${fname}（${mixed.duration.toFixed(1)}秒，目标${STATE.duration.toFixed(1)}秒，${STATE.segments.length}段BGM）`;
-  } else {
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob); a.download = fname; a.click();
-    st.textContent = `✅ 已导出 ${fname}（${mixed.duration.toFixed(1)}秒，目标${STATE.duration.toFixed(1)}秒，${STATE.segments.length}段BGM，${desc}）`;
-  }
-  setProgress(bar, 100, "完成");
 };
 
 function fmt(t) { t=Math.max(0,t|0); return `${(t/60)|0}:${String(t%60).padStart(2,'0')}`; }
