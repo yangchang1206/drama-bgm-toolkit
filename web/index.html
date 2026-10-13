@@ -2,16 +2,20 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>BGM工作台</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>BGM工作台 v2.1</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background: #f5f6fa; color: #222; }
 h1 { text-align: center; padding: 16px; font-size: 22px; }
+.ver { text-align:center; font-size:11px; color:#999; margin-bottom:8px; }
 .sub { text-align: center; color: #888; font-size: 13px; margin-bottom: 16px; }
 #globalErr { display:none; background:#dc2626; color:#fff; padding:10px 16px; font-size:13px; margin:0 16px 12px; border-radius:6px; white-space:pre-wrap; font-family:Consolas,monospace; }
-#readyBar { background:#dcfce7; color:#15803d; padding:8px 16px; font-size:12px; margin:0 16px 12px; border-radius:6px; }
+#readyBar { background:#fef3c7; color:#92400e; padding:8px 16px; font-size:12px; margin:0 16px 12px; border-radius:6px; }
 .row { display: grid; grid-template-columns: 1fr 1.2fr 1.2fr; gap: 12px; padding: 0 16px 16px; }
 .col { background: #fff; border-radius: 8px; padding: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 .col h3 { font-size: 14px; margin-bottom: 8px; }
@@ -67,10 +71,11 @@ input[type=range] { width: 100%; margin-top: 6px; }
 </head>
 <body>
 <h1>🎬 BGM 工作台</h1>
+<div class="ver">版本 v2.1 · 如看到此行号说明已是新版</div>
 <div class="sub">纯前端 · 选音乐库 → 上传视频+剧本 → AI看图分析情绪 → 自动合并相似段 → 导出</div>
 
 <div id="globalErr"></div>
-<div id="readyBar">⏳ 正在加载向量索引（7.4MB）...</div>
+<div id="readyBar">⏳ 正在初始化...</div>
 
 <div class="api-box">
   <label>🔑 阿里云API Key:</label>
@@ -223,43 +228,49 @@ function setProgress(el, pct, text) {
   el.textContent = `${pct}% ${text||""}`;
 }
 
-async function fetchWithProgress(url, onProgress) {
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error("HTTP "+resp.status);
-  const reader = resp.body.getReader();
-  const total = parseInt(resp.headers.get("content-length")||"0");
-  let received = 0; const chunks = [];
-  while (true) {
-    const {done, value} = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.length;
-    if (onProgress) onProgress(received, total);
-  }
-  const blob = new Blob(chunks);
-  return await blob.text();
+async function fetchWithProgress(url, onProgress, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(()=>controller.abort(), timeoutMs || 20000);
+  try {
+    const resp = await fetch(url, { signal: controller.signal });
+    if (!resp.ok) throw new Error("HTTP "+resp.status);
+    const reader = resp.body.getReader();
+    const total = parseInt(resp.headers.get("content-length")||"0");
+    let received = 0; const chunks = [];
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      if (onProgress) onProgress(received, total);
+    }
+    const blob = new Blob(chunks);
+    return await blob.text();
+  } finally { clearTimeout(timer); }
 }
 
 async function loadEmb() {
   const rb = document.getElementById("readyBar");
-  const urls = [
+  const mirrors = [
     "https://cdn.jsdelivr.net/gh/yangchang1206/drama-bgm-toolkit@main/web/web_embeddings.json",
+    "https://fastly.jsdelivr.net/gh/yangchang1206/drama-bgm-toolkit@main/web/web_embeddings.json",
+    "https://raw.githubusercontent.com/yangchang1206/drama-bgm-toolkit/main/web/web_embeddings.json",
     "web_embeddings.json"
   ];
-  let lastErr = null;
-  for (const url of urls) {
+  for (let mi=0; mi<mirrors.length; mi++) {
     try {
-      rb.textContent = "⏳ 正在从CDN下载向量索引（7.4MB）... 0%";
+      const url = mirrors[mi];
+      rb.textContent = `⏳ 正在从镜像${mi+1}/${mirrors.length}下载向量索引...`;
       rb.style.background = "#fef3c7"; rb.style.color = "#92400e";
       const text = await fetchWithProgress(url, (rec, tot) => {
         if (tot) {
           const pct = Math.round(rec/tot*100);
           const mb = (rec/1048576).toFixed(1);
-          rb.textContent = `⏳ 正在下载向量索引... ${pct}%（${mb}MB）`;
+          rb.textContent = `⏳ 下载中 ${pct}%（${mb}MB / 共${(tot/1048576).toFixed(1)}MB）`;
         } else {
-          rb.textContent = `⏳ 正在下载... ${(rec/1048576).toFixed(1)}MB`;
+          rb.textContent = `⏳ 下载中 ${(rec/1048576).toFixed(1)}MB...`;
         }
-      });
+      }, 15000);
       rb.textContent = "⏳ 正在解析向量索引...";
       EMB = JSON.parse(text);
       const inst = EMB.filter(e=>e.voc!=="yes").length;
@@ -267,12 +278,12 @@ async function loadEmb() {
       rb.style.background = "#dcfce7"; rb.style.color = "#15803d";
       return;
     } catch(e) {
-      lastErr = e;
-      console.warn("fetch failed:", url, e);
+      console.warn("mirror", mi, "failed:", e.message);
+      rb.textContent = `⚠️ 镜像${mi+1}失败（${e.message}），尝试下一个...`;
     }
   }
-  rb.innerHTML = `⚠️ 向量库加载失败：${lastErr?.message||"unknown"}。请检查网络后刷新。`;
-  rb.style.background = "#fef3c7"; rb.style.color = "#92400e";
+  rb.innerHTML = `❌ <b>所有镜像都加载失败</b>。请检查网络后按 Ctrl+F5 刷新。<br>如果一直卡住，说明GitHub在国内被墙，需要开代理。`;
+  rb.style.background = "#fee2e2"; rb.style.color = "#991b1b";
 }
 loadEmb();
 
