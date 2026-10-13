@@ -10,6 +10,8 @@
 body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background: #f5f6fa; color: #222; }
 h1 { text-align: center; padding: 16px; font-size: 22px; }
 .sub { text-align: center; color: #888; font-size: 13px; margin-bottom: 16px; }
+#globalErr { display:none; background:#dc2626; color:#fff; padding:10px 16px; font-size:13px; margin:0 16px 12px; border-radius:6px; white-space:pre-wrap; font-family:Consolas,monospace; }
+#readyBar { background:#dcfce7; color:#15803d; padding:8px 16px; font-size:12px; margin:0 16px 12px; border-radius:6px; }
 .row { display: grid; grid-template-columns: 1fr 1.2fr 1.2fr; gap: 12px; padding: 0 16px 16px; }
 .col { background: #fff; border-radius: 8px; padding: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 .col h3 { font-size: 14px; margin-bottom: 8px; }
@@ -59,7 +61,7 @@ input[type=range] { width: 100%; margin-top: 6px; }
 .ai-tag { display:inline-block; background:#dcfce7; color:#15803d; padding:1px 6px; border-radius:3px; font-size:10px; margin-left:4px; }
 .merge-tag { display:inline-block; background:#fce7f3; color:#be185d; padding:1px 6px; border-radius:3px; font-size:10px; margin-left:4px; }
 .loading-hint { color:#0284c7; font-size:11px; margin-left:6px; }
-.align-info { font-size:11px; color:#b45309; margin-top:4px; }
+.scan-progress { font-size:11px; color:#0284c7; margin-top:4px; }
 @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -67,9 +69,12 @@ input[type=range] { width: 100%; margin-top: 6px; }
 <h1>🎬 BGM 工作台</h1>
 <div class="sub">纯前端 · 选音乐库 → 上传视频+剧本 → AI看图分析情绪 → 自动合并相似段 → 导出</div>
 
+<div id="globalErr"></div>
+<div id="readyBar">⏳ 正在加载向量索引（7.4MB）...</div>
+
 <div class="api-box">
   <label>🔑 阿里云API Key:</label>
-  <input type="password" id="apiKey" placeholder="sk-... （存在浏览器本地，不上传）">
+  <input type="password" id="apiKey" placeholder="sk-...">
   <button id="saveKeyBtn" class="secondary" style="margin-top:0;">保存</button>
   <button id="testKeyBtn" class="teal" style="margin-top:0;">🔌 测试连接</button>
   <span id="apiMsg" class="api-msg"></span>
@@ -78,10 +83,11 @@ input[type=range] { width: 100%; margin-top: 6px; }
 <div style="padding:0 16px 12px; display:grid; grid-template-columns:1fr 1fr; gap:12px;">
   <div class="col" style="padding:10px;">
     <b>① 音乐库文件夹</b>
-    <div class="banner">先选文件夹，再点分析音乐库建立索引。</div>
+    <div class="banner">选文件夹后自动扫描（5000+首约需1-3分钟，请勿操作其他按钮）</div>
     <button id="pickBtn">📁 选择音乐文件夹</button>
     <button id="analyzeLibBtn" class="teal" disabled>🎵 分析音乐库</button>
     <div id="fileInfo" class="fileinfo">未选择</div>
+    <div id="scanProgress" class="scan-progress"></div>
     <div class="pbar-wrap" id="libPbarWrap"><div class="pbar" id="libPbar" style="width:0%">0%</div></div>
     <div id="libList" class="musiclib"></div>
   </div>
@@ -101,19 +107,19 @@ input[type=range] { width: 100%; margin-top: 6px; }
     <div id="videoInfo" class="video-info">未选视频</div>
     <div class="detect-box">
       <button id="detectBtn" class="purple" disabled>🎬 自动检测镜头切换点</button>
-      <div style="font-size:11px;color:#6b21a8;margin-top:4px;">本地抽帧+帧差，自动合并短段。BGM段再经情绪相似度二次合并，目标2-4段。</div>
+      <div style="font-size:11px;color:#6b21a8;margin-top:4px;">本地抽帧+帧差，自动合并短段。</div>
       <div id="mergeInfo" class="merge-info"></div>
     </div>
     <div class="tp-row">
-      <label>🎯 BGM分段时间点（自动检测后可手改）:</label>
+      <label>🎯 BGM分段时间点:</label>
       <input type="text" id="timepoints" placeholder="示例: 0-22.5, 22.5-108">
     </div>
     <button id="analyzeBtn" disabled>🔍 AI看图分析情绪 + 自动合并选曲</button>
     <div class="fmt-row">
       <label>导出格式:</label>
       <div class="fmt-btns">
-        <button class="fmt-btn on" data-fmt="mp3">🎵 MP3（推荐）</button>
-        <button class="fmt-btn" data-fmt="wav">📼 WAV（无损）</button>
+        <button class="fmt-btn on" data-fmt="mp3">🎵 MP3</button>
+        <button class="fmt-btn" data-fmt="wav">📼 WAV</button>
       </div>
     </div>
     <button id="exportAllBtn" class="export-btn green" disabled>💾 导出整集BGM</button>
@@ -131,6 +137,19 @@ input[type=range] { width: 100%; margin-top: 6px; }
 </div>
 
 <script>
+window.addEventListener("error", function(e) {
+  const el = document.getElementById("globalErr");
+  if (!el) return;
+  el.style.display = "block";
+  el.textContent = "❌ JS错误: " + (e.message || e.error);
+});
+window.addEventListener("unhandledrejection", function(e) {
+  const el = document.getElementById("globalErr");
+  if (!el) return;
+  el.style.display = "block";
+  el.textContent = "❌ 异步错误: " + (e.reason && (e.reason.message || e.reason));
+});
+
 let EMB = [], SONG_MAP = {}, OUT_DIR = null;
 let LIB_READY = false;
 let API_KEY = localStorage.getItem("dashscope_key") || "";
@@ -139,17 +158,10 @@ let EXPORT_FMT = "mp3";
 let actx = null;
 let VIDEO_DUR = 0;
 let analyzeVideoEl = null;
+let curPreviewSource = null, curPreviewGain = null, playTimer = null, previewToken = 0;
 
-let curPreviewSource = null;
-let curPreviewGain = null;
-let playTimer = null;
-let previewToken = 0;
-
-const CROSSFADE_SEC = 4.0;
-const FADE_IN = 2.0;
-const FADE_OUT = 3.0;
-const MERGE_SIM_THRESHOLD = 0.72;
-const MAX_MUSIC_SEGMENTS = 4;
+const CROSSFADE_SEC = 4.0, FADE_IN = 2.0, FADE_OUT = 3.0;
+const MERGE_SIM_THRESHOLD = 0.72, MAX_MUSIC_SEGMENTS = 4;
 
 function getCtx() { if (!actx) actx = new (window.AudioContext||window.webkitAudioContext)(); return actx; }
 function yieldUI() { return new Promise(r=>setTimeout(r,0)); }
@@ -163,11 +175,9 @@ function stopPreview() {
     if (curPreviewGain) { try { curPreviewGain.disconnect(); } catch(e){} curPreviewGain = null; }
   } catch(e){}
   const bar = document.getElementById("seekBar");
-  const ct = document.getElementById("curTime");
-  const dt = document.getElementById("durTime");
   if (bar) bar.value = 0;
-  if (ct) ct.textContent = "0:00";
-  if (dt) dt.textContent = "0:00";
+  const ct = document.getElementById("curTime"); if (ct) ct.textContent = "0:00";
+  const dt = document.getElementById("durTime"); if (dt) dt.textContent = "0:00";
 }
 
 document.querySelectorAll(".fmt-btn").forEach(btn => {
@@ -182,7 +192,7 @@ document.getElementById("apiKey").value = API_KEY;
 document.getElementById("saveKeyBtn").onclick = () => {
   API_KEY = document.getElementById("apiKey").value.trim();
   localStorage.setItem("dashscope_key", API_KEY);
-  document.getElementById("apiMsg").textContent = "✅ 已保存";
+  document.getElementById("apiMsg").textContent = "✅ 已保存（"+API_KEY.length+"字符）";
   document.getElementById("apiMsg").className = "api-msg ok";
 };
 
@@ -199,10 +209,10 @@ document.getElementById("testKeyBtn").onclick = async () => {
     });
     if (!r.ok) { const e = await r.json().catch(()=>({error:{message:r.statusText}})); throw new Error(e.error?.message || r.status); }
     const j = await r.json();
-    msg.textContent = `✅ embedding连接成功（维度 ${j.data?.[0]?.embedding?.length}）`;
+    msg.textContent = `✅ 连接成功（维度 ${j.data?.[0]?.embedding?.length}）`;
     msg.className = "api-msg ok";
   } catch(e) {
-    msg.textContent = `❌ 失败：${e.message}`;
+    msg.textContent = `❌ ${e.message}`;
     msg.className = "api-msg err";
   }
 };
@@ -214,27 +224,64 @@ function setProgress(el, pct, text) {
 }
 
 async function loadEmb() {
-  try { const r = await fetch("web_embeddings.json"); EMB = await r.json(); console.log("emb loaded", EMB.length); }
-  catch(e) { console.error("emb load fail", e); }
+  const rb = document.getElementById("readyBar");
+  try {
+    rb.textContent = "⏳ 正在下载向量索引（7.4MB）...";
+    const r = await fetch("web_embeddings.json");
+    if (!r.ok) throw new Error("HTTP "+r.status);
+    rb.textContent = "⏳ 正在解析...";
+    EMB = await r.json();
+    const inst = EMB.filter(e=>e.voc!=="yes").length;
+    rb.innerHTML = `✅ <b>页面就绪</b>：共${EMB.length}首，纯器乐${inst}首。`;
+  } catch(e) {
+    rb.innerHTML = `⚠️ 向量库加载失败：${e.message}（其他功能仍可用）`;
+    rb.style.background = "#fef3c7"; rb.style.color = "#92400e";
+  }
 }
 loadEmb();
 
 async function scanDir(dirHandle, map) {
+  let count = 0;
+  const prog = document.getElementById("scanProgress");
   for await (const entry of dirHandle.values()) {
-    if (entry.kind === "directory") await scanDir(entry, map);
-    else if (entry.kind === "file" && /\.(mp3|wav|m4a|ogg|flac)$/i.test(entry.name)) map[entry.name.toLowerCase()] = entry;
+    if (entry.kind === "directory") {
+      await scanDir(entry, map);
+    } else if (entry.kind === "file" && /\.(mp3|wav|m4a|ogg|flac)$/i.test(entry.name)) {
+      map[entry.name.toLowerCase()] = entry;
+      count++;
+      if (count % 50 === 0) {
+        prog.textContent = `已扫描 ${count} 个音频文件...`;
+        await yieldUI();
+      }
+    }
   }
+  return count;
 }
 
 document.getElementById("pickBtn").onclick = async () => {
+  const btn = document.getElementById("pickBtn");
+  const fi = document.getElementById("fileInfo");
+  const prog = document.getElementById("scanProgress");
   try {
+    btn.disabled = true; btn.textContent = "⏳ 等待选择文件夹...";
     const h = await window.showDirectoryPicker();
     SONG_MAP = {};
-    document.getElementById("fileInfo").textContent = "扫描中...";
-    await scanDir(h, SONG_MAP);
-    document.getElementById("fileInfo").textContent = `已选：${h.name}（${Object.keys(SONG_MAP).length} 首）`;
+    fi.textContent = "正在扫描文件（请勿操作其他按钮）...";
+    prog.textContent = "开始递归扫描...";
+    const total = await scanDir(h, SONG_MAP);
+    fi.textContent = `✅ 已选：${h.name}（${total} 个音频文件）`;
+    prog.textContent = "";
     document.getElementById("analyzeLibBtn").disabled = false;
-  } catch(e) {}
+    btn.textContent = "📁 重新选择音乐文件夹";
+  } catch(e) {
+    if (e.name !== "AbortError") {
+      fi.textContent = "❌ 扫描出错：" + e.message;
+      fi.style.color = "#dc2626";
+    } else {
+      fi.textContent = "未选择";
+    }
+    btn.disabled = false; btn.textContent = "📁 选择音乐文件夹";
+  }
 };
 
 document.getElementById("analyzeLibBtn").onclick = async () => {
@@ -245,10 +292,10 @@ document.getElementById("analyzeLibBtn").onclick = async () => {
   await new Promise(r=>setTimeout(r,200));
   let matched = 0, list = [];
   for (const e of EMB) { if (e.voc === "yes") continue; if (SONG_MAP[e.fn.toLowerCase()]) { matched++; list.push(e.fn); } }
-  setProgress(bar, 100, `完成：匹配 ${matched}/${EMB.filter(e=>e.voc!=='yes').length} 首纯器乐`);
+  setProgress(bar, 100, `完成：匹配 ${matched} 首纯器乐`);
   document.getElementById("status").textContent = `音乐库就绪：本地${n}首，可搜纯器乐${matched}首`;
   const lv = document.getElementById("libList");
-  lv.innerHTML = list.slice(0,50).map(f=>`<div class="song">🎵 ${esc(f)}</div>`).join("") + (list.length>50?`<div style="color:#888;font-size:11px;padding:4px;">...共${list.length}首</div>`:"");
+  lv.innerHTML = list.slice(0,50).map(f=>`<div class="song">🎵 ${esc(f)}</div>`).join("") + (list.length>50?`<div style="color:#888;font-size:11px;padding:4px;">...共${list.length}首</div>":"");
   LIB_READY = true;
   document.getElementById("analyzeBtn").disabled = false;
 };
@@ -319,7 +366,7 @@ async function grabFrame(videoEl, timeSec) {
 
 async function aiMoodQuery(dataUrl, scriptText) {
   if (!API_KEY) throw new Error("no key");
-  const prompt = `这是短剧某一BGM段的中间画面截图。\n剧本片段：\n${scriptText.slice(0, 800)}\n\n任务：根据画面里主角的表情、动作、氛围，用15-25个英文单词描述这段应该配什么BGM情绪和风格，用于音乐检索。要求：\n1. 贴主角内心情绪（tense/relieved/determined/warm/angry/sad/vulnerable/triumphant/suspenseful等）\n2. 纯器乐，无人声（instrumental, no vocals）\n3. 只输出英文query一行，不要解释`;
+  const prompt = `这是短剧某一BGM段的中间画面截图。\n剧本片段：\n${scriptText.slice(0, 800)}\n\n任务：根据画面里主角的表情、动作、氛围，用15-25个英文单词描述这段应该配什么BGM情绪和风格。要求：\n1. 贴主角内心情绪（tense/relieved/determined/warm/angry/sad/vulnerable/triumphant/suspenseful等）\n2. 纯器乐，无人声（instrumental, no vocals）\n3. 只输出英文query一行`;
   const r = await fetch("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", {
     method: "POST",
     headers: { "Authorization": `Bearer ${API_KEY}`, "Content-Type": "application/json" },
@@ -329,8 +376,7 @@ async function aiMoodQuery(dataUrl, scriptText) {
         { type: "image_url", image_url: { url: dataUrl } },
         { type: "text", text: prompt }
       ]}],
-      max_tokens: 120,
-      temperature: 0.3
+      max_tokens: 120, temperature: 0.3
     })
   });
   if (!r.ok) { const e = await r.json().catch(()=>({error:{message:r.status}})); throw new Error(e.error?.message || ("HTTP "+r.status)); }
@@ -363,12 +409,11 @@ document.getElementById("video").onchange = async (e) => {
   if (!f) return;
   const d = await probeDuration(f);
   VIDEO_DUR = d;
-  document.getElementById("videoInfo").textContent = `✅ 视频时长: ${d.toFixed(1)} 秒（${(d/60).toFixed(1)} 分钟）`;
+  document.getElementById("videoInfo").textContent = `✅ 视频时长: ${d.toFixed(1)} 秒`;
   document.getElementById("detectBtn").disabled = false;
   if (analyzeVideoEl) analyzeVideoEl.remove();
   analyzeVideoEl = document.createElement("video");
-  analyzeVideoEl.muted = true;
-  analyzeVideoEl.playsInline = true;
+  analyzeVideoEl.muted = true; analyzeVideoEl.playsInline = true;
   analyzeVideoEl.style.display = "none";
   document.body.appendChild(analyzeVideoEl);
   analyzeVideoEl.src = URL.createObjectURL(f);
@@ -403,10 +448,7 @@ async function detectScenes(file, onProgress) {
                 const dr = d[j] - prevData[j], dg = d[j+1] - prevData[j+1], db = d[j+2] - prevData[j+2];
                 sum += dr*dr + dg*dg + db*db;
               }
-              if (sum/(n*3) > THRESHOLD) {
-                const lastCut = cuts[cuts.length-1];
-                if (t - lastCut > MIN_GAP) cuts.push(t);
-              }
+              if (sum/(n*3) > THRESHOLD) { const lastCut = cuts[cuts.length-1]; if (t - lastCut > MIN_GAP) cuts.push(t); }
             }
             prevData = d;
             onProgress && onProgress((i+1)/times.length, t);
@@ -439,17 +481,16 @@ document.getElementById("detectBtn").onclick = async () => {
   btn.disabled = true; btn.textContent = "🎬 检测中...";
   const bar = document.getElementById("pbar");
   try {
-    const rawCuts = await detectScenes(vf, (p,t) => setProgress(bar, Math.round(p*90), `抽帧分析 ${t.toFixed(1)}s`));
+    const rawCuts = await detectScenes(vf, (p,t) => setProgress(bar, Math.round(p*90), `抽帧 ${t.toFixed(1)}s`));
     setProgress(bar, 95, "合并短段...");
     await yieldUI();
     const merged = mergeShortSegments(rawCuts, VIDEO_DUR);
     const segs = [];
     for (let i=0;i<merged.length-1;i++) segs.push(`${merged[i].toFixed(1)}-${merged[i+1].toFixed(1)}`);
     document.getElementById("timepoints").value = segs.join(", ");
-    document.getElementById("mergeInfo").textContent = `原始${rawCuts.length-1}段 → 镜头合并后${merged.length-1}段（还会经情绪相似度二次合并）`;
-    document.getElementById("status").textContent = `✅ 检测到 ${merged.length-1} 个镜头段，已填入。点【AI看图分析情绪+选曲】后会自动合并相似情绪段。`;
-    btn.textContent = "🎬 重新检测";
-    btn.disabled = false;
+    document.getElementById("mergeInfo").textContent = `${rawCuts.length-1}段 → 合并后${merged.length-1}段`;
+    document.getElementById("status").textContent = `✅ 检测到 ${merged.length-1} 个镜头段。`;
+    btn.textContent = "🎬 重新检测"; btn.disabled = false;
     setProgress(bar, 100, "完成");
   } catch(e) {
     alert("检测失败："+e.message);
@@ -478,7 +519,7 @@ function renderSegList() {
     d.className = "seg" + (i===STATE.cur?" active":"");
     const tags = [];
     if (s.fromAI) tags.push('<span class="ai-tag">AI</span>');
-    if (s.mergedCount > 1) tags.push(`<span class="merge-tag">合并${s.mergedCount}镜头</span>`);
+    if (s.mergedCount > 1) tags.push(`<span class="merge-tag">合并${s.mergedCount}</span>`);
     const songName = (s.candidates && s.candidates[s.track]) ? s.candidates[s.track].fn : "无候选";
     d.innerHTML = `<b>${esc(s.id)}</b> <span class="mood">${esc(s.mood)}</span> ${tags.join("")}<br><span style="color:#666;font-size:11px;">${(s.timeStart||0).toFixed(0)}-${(s.timeEnd||0).toFixed(0)}s · ${esc(songName.slice(0,28))}</span>`;
     d.onclick = () => { STATE.cur = i; stopPreview(); renderSegList(); renderDetail(); };
@@ -492,20 +533,17 @@ async function renderDetail() {
   if (!s) { el.innerHTML = '<div style="color:#aaa;font-size:12px;">无分段</div>'; return; }
   stopPreview();
   const cand = (s.candidates && s.candidates[s.track]) ? s.candidates[s.track] : null;
-  if (!cand) {
-    el.innerHTML = `<div style="color:#999;font-size:12px;">该段无候选曲（本地音乐库与向量库未匹配）<br><br>请检查：<br>1. 音乐文件夹是否选对<br>2. 是否点了【分析音乐库】<br>3. 歌曲文件名是否和向量库一致</div>`;
-    return;
-  }
+  if (!cand) { el.innerHTML = `<div style="color:#999;font-size:12px;">该段无候选曲</div>`; return; }
   const tags = [];
-  if (s.fromAI) tags.push('<span class="ai-tag">AI看图生成</span>');
-  if (s.mergedCount > 1) tags.push(`<span class="merge-tag">合并了${s.mergedCount}个镜头段</span>`);
+  if (s.fromAI) tags.push('<span class="ai-tag">AI看图</span>');
+  if (s.mergedCount > 1) tags.push(`<span class="merge-tag">合并${s.mergedCount}镜头</span>`);
   el.innerHTML = `<b>段 ${esc(s.id)}</b> <span class="mood">${esc(s.mood)}</span> ${tags.join("")}<br>
-    <span style="color:#666;font-size:11px;">视频区间: ${(s.timeStart||0).toFixed(1)}s - ${(s.timeEnd||0).toFixed(1)}s（共${((s.timeEnd||0)-(s.timeStart||0)).toFixed(1)}s）</span><br>
-    <div class="query-box">🔍 query: ${esc(s.query||"")}</div>
-    <div class="song sel">${esc(cand.fn)} (相似度${(cand.sim||0).toFixed(2)})</div>
+    <span style="color:#666;font-size:11px;">${(s.timeStart||0).toFixed(1)}s - ${(s.timeEnd||0).toFixed(1)}s</span><br>
+    <div class="query-box">🔍 ${esc(s.query||"")}</div>
+    <div class="song sel">${esc(cand.fn)} (${(cand.sim||0).toFixed(2)})</div>
     <div style="margin-top:8px;">
-      <label style="font-size:12px;">素材起始: <input type="number" id="st" value="${(s.srcStart||2).toFixed(1)}" step="0.5" style="width:70px;">秒</label>
-      <label style="font-size:12px;">素材时长: <input type="number" id="dur" value="${(s.srcDur||30).toFixed(1)}" step="0.5" style="width:70px;">秒</label>
+      <label style="font-size:12px;">素材起始: <input type="number" id="st" value="${(s.srcStart||2).toFixed(1)}" step="0.5" style="width:70px;">s</label>
+      <label style="font-size:12px;">时长: <input type="number" id="dur" value="${(s.srcDur||30).toFixed(1)}" step="0.5" style="width:70px;">s</label>
     </div>
     <div id="cands" style="margin-top:8px;"></div>
     <button id="previewBtn">▶ 播放</button>
@@ -529,14 +567,13 @@ async function renderDetail() {
     const hint = document.getElementById("loadHint");
     const myToken = ++previewToken;
     stopPreview();
-    btn.disabled = true;
-    btn.textContent = "⏳ 加载...";
-    hint.textContent = "正在解码音频...";
+    btn.disabled = true; btn.textContent = "⏳ 加载...";
+    hint.textContent = "解码中...";
     try {
       s.srcStart = parseFloat(document.getElementById("st").value) || 2;
       s.srcDur = parseFloat(document.getElementById("dur").value) || 30;
       const fh = SONG_MAP[cand.fn.toLowerCase()];
-      if (!fh) throw new Error("找不到文件："+cand.fn);
+      if (!fh) throw new Error("找不到："+cand.fn);
       const buf = await decodeAudioFile(fh);
       if (myToken !== previewToken) return;
       const ctx = getCtx();
@@ -546,13 +583,11 @@ async function renderDetail() {
       const gain = ctx.createGain();
       src.connect(gain); gain.connect(ctx.destination);
       src.start(0, off, dur);
-      curPreviewSource = src;
-      curPreviewGain = gain;
+      curPreviewSource = src; curPreviewGain = gain;
       const bar = document.getElementById("seekBar");
       document.getElementById("durTime").textContent = fmt(dur);
       const t0 = ctx.currentTime;
-      btn.textContent = "🔄 播放中（再点停止）";
-      hint.textContent = "";
+      btn.textContent = "🔄 播放中"; hint.textContent = "";
       playTimer = setInterval(() => {
         if (myToken !== previewToken) { clearInterval(playTimer); return; }
         const t = ctx.currentTime - t0;
@@ -562,10 +597,7 @@ async function renderDetail() {
       }, 100);
       src.onended = () => { if (myToken === previewToken) stopPreview(); };
     } catch(e) {
-      if (myToken === previewToken) {
-        alert("解码失败："+e.message);
-        hint.textContent = "";
-      }
+      if (myToken === previewToken) { alert("解码失败："+e.message); hint.textContent = ""; }
     } finally {
       if (myToken === previewToken) { btn.disabled = false; btn.textContent = "▶ 播放"; }
     }
@@ -593,10 +625,8 @@ document.getElementById("analyzeBtn").onclick = async () => {
       await new Promise(r => { analyzeVideoEl.onloadedmetadata = r; });
     }
     const dur = analyzeVideoEl.duration;
-    STATE.duration = dur;
-    VIDEO_DUR = dur;
+    STATE.duration = dur; VIDEO_DUR = dur;
     document.getElementById("videoInfo").textContent = `✅ 视频时长: ${dur.toFixed(1)} 秒`;
-
     const scenes = parseScenes(script);
     const tpStr = document.getElementById("timepoints").value.trim();
     let timeSegs = tpStr ? parseTimepoints(tpStr, dur) : null;
@@ -610,11 +640,9 @@ document.getElementById("analyzeBtn").onclick = async () => {
         segDefs.push({ id: sc.id, start: s.start, end: s.end, text: sc.text });
       }
     } else {
-      const n = scenes.length || 1;
-      const segLen = dur/n;
+      const n = scenes.length || 1; const segLen = dur/n;
       for (let i=0;i<n;i++) segDefs.push({id:scenes[i]?.id||`seg${i+1}`, start:i*segLen, end:(i+1)*segLen, text:scenes[i]?.text||script});
     }
-
     const n = segDefs.length;
     const rawSegs = [];
     const usedSongs = new Set();
@@ -623,21 +651,19 @@ document.getElementById("analyzeBtn").onclick = async () => {
       const mid = (s.start+s.end)/2;
       let query, fromAI = false;
       try {
-        setProgress(bar, 5 + Math.round((i/n)*45), `段${i+1}/${n} AI看图 (${mid.toFixed(1)}s)`);
+        setProgress(bar, 5 + Math.round((i/n)*45), `段${i+1}/${n} AI看图`);
         await yieldUI();
         const frame = await grabFrame(analyzeVideoEl, mid);
         query = await aiMoodQuery(frame, s.text);
         fromAI = true;
       } catch(e) {
-        console.warn("AI mood fail, fallback", e);
-        const fb = analyzeMood(s.text);
-        query = fb.query;
+        console.warn("AI fallback", e);
+        query = analyzeMood(s.text).query;
       }
       const qVec = await embedText(query);
       rawSegs.push({ id: s.id, start: s.start, end: s.end, text: s.text, query, qVec, fromAI });
     }
-
-    setProgress(bar, 55, "情绪相似段合并...");
+    setProgress(bar, 55, "合并相似情绪段...");
     await yieldUI();
     function cos(a,b){ let d=0,na=0,nb=0; for(let i=0;i<a.length;i++){ d+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; } return d/(Math.sqrt(na)*Math.sqrt(nb)||1); }
     const mergedGroups = [];
@@ -648,18 +674,15 @@ document.getElementById("analyzeBtn").onclick = async () => {
       else { mergedGroups.push(curGroup); curGroup = [rawSegs[i]]; }
     }
     mergedGroups.push(curGroup);
-
     STATE.segments = [];
     for (let g=0; g<mergedGroups.length; g++) {
       const grp = mergedGroups[g];
-      const gStart = grp[0].start;
-      const gEnd = grp[grp.length-1].end;
-      const gDur = gEnd - gStart;
+      const gStart = grp[0].start, gEnd = grp[grp.length-1].end, gDur = gEnd - gStart;
       const avgVec = new Float32Array(rawSegs[0].qVec.length);
       for (const s of grp) for (let i=0;i<avgVec.length;i++) avgVec[i] += s.qVec[i];
       for (let i=0;i<avgVec.length;i++) avgVec[i] /= grp.length;
       const gQuery = grp.map(s=>s.query).join(" / ");
-      setProgress(bar, 60 + Math.round((g/mergedGroups.length)*30), `选曲组${g+1}/${mergedGroups.length}（覆盖${gStart.toFixed(0)}-${gEnd.toFixed(0)}s）`);
+      setProgress(bar, 60 + Math.round((g/mergedGroups.length)*30), `选曲组${g+1}/${mergedGroups.length}`);
       await yieldUI();
       const qn = norm(Array.from(avgVec));
       let scores = EMB.filter(e => e.voc !== "yes" && SONG_MAP[e.fn.toLowerCase()] && !usedSongs.has(e.fn))
@@ -668,31 +691,23 @@ document.getElementById("analyzeBtn").onclick = async () => {
       scores.sort((a,b)=>b.sim-a.sim);
       const top = scores.slice(0,10);
       if (top.length) usedSongs.add(top[0].fn);
-      // 每段素材需要的时长 = 该段视频时长 + crossfade重叠量（除最后一段）
       const needExtra = (g < mergedGroups.length-1) ? CROSSFADE_SEC : 0;
       STATE.segments.push({
         id: grp[0].id + (grp.length>1?`+${grp.length-1}`:""),
-        timeStart: gStart, timeEnd: gEnd,
-        mood: grp[0].fromAI ? "AI" : "规则",
-        query: gQuery,
-        fromAI: grp[0].fromAI,
-        mergedCount: grp.length,
-        candidates: top, track: 0,
-        srcStart: 2, srcDur: gDur + needExtra
+        timeStart: gStart, timeEnd: gEnd, mood: grp[0].fromAI ? "AI" : "规则",
+        query: gQuery, fromAI: grp[0].fromAI, mergedCount: grp.length,
+        candidates: top, track: 0, srcStart: 2, srcDur: gDur + needExtra
       });
     }
-
-    setProgress(bar, 95, "渲染结果...");
+    setProgress(bar, 95, "渲染...");
     await yieldUI();
-    renderSegList();
-    renderDetail();
-    st.textContent = `✅ 完成！镜头${n}段 → 情绪合并后${STATE.segments.length}段BGM（换歌${STATE.segments.length-1}次，crossfade ${CROSSFADE_SEC}s）。视频${dur.toFixed(1)}秒，导出将严格对齐此时长。`;
-    st.className = "status";
+    renderSegList(); renderDetail();
+    st.textContent = `✅ 完成！${n}段 → 合并后${STATE.segments.length}段BGM，视频${dur.toFixed(1)}秒。`;
     setProgress(bar, 100, "完成");
     document.getElementById("exportAllBtn").disabled = false;
   } catch(e) {
     console.error(e);
-    st.textContent = `❌ 出错：${e.message}\n\n请按F12打开控制台截图发我。`;
+    st.textContent = `❌ ${e.message}`;
     st.className = "status err";
     setProgress(bar, 100, "错误");
   }
@@ -742,9 +757,7 @@ async function crossfadeConcatAsync(bufs, overlap) {
 }
 
 async function buildSegmentBuffer(seg, neededDur) {
-  const pieces = [];
-  let filled = 0;
-  const used = new Set();
+  const pieces = []; let filled = 0; const used = new Set();
   for (let i=0; i<seg.candidates.length && filled < neededDur; i++) {
     const c = seg.candidates[i];
     if (used.has(c.fn)) continue;
@@ -754,9 +767,7 @@ async function buildSegmentBuffer(seg, neededDur) {
       const full = await decodeAudioFile(fh);
       const remain = neededDur - filled;
       const piece = sliceBuffer(full, seg.srcStart, remain + CROSSFADE_SEC);
-      pieces.push(piece);
-      filled += piece.duration;
-      used.add(c.fn);
+      pieces.push(piece); filled += piece.duration; used.add(c.fn);
     } catch(e) { console.warn("decode fail", c.fn, e); }
     await yieldUI();
   }
@@ -765,36 +776,27 @@ async function buildSegmentBuffer(seg, neededDur) {
   return crossfadeConcatAsync(pieces, 1.5);
 }
 
-// 强制对齐到目标时长：长了裁，短了补静音
 function alignToDuration(buf, targetDur) {
   const ctx = getCtx();
   const targetLen = Math.round(targetDur * buf.sampleRate);
   if (buf.length === targetLen) return buf;
   if (buf.length > targetLen) {
-    // 裁掉尾部
     const out = ctx.createBuffer(buf.numberOfChannels, targetLen, buf.sampleRate);
-    for (let ch=0; ch<buf.numberOfChannels; ch++) {
-      out.copyToChannel(buf.getChannelData(ch).subarray(0, targetLen), ch);
-    }
+    for (let ch=0; ch<buf.numberOfChannels; ch++) out.copyToChannel(buf.getChannelData(ch).subarray(0, targetLen), ch);
     return out;
   }
-  // 短了补静音
   const out = ctx.createBuffer(buf.numberOfChannels, targetLen, buf.sampleRate);
-  for (let ch=0; ch<buf.numberOfChannels; ch++) {
-    out.getChannelData(ch).set(buf.getChannelData(ch), 0);
-  }
+  for (let ch=0; ch<buf.numberOfChannels; ch++) out.getChannelData(ch).set(buf.getChannelData(ch), 0);
   return out;
 }
 
-function bufferToMp3(buf, kbps=192) {
+function bufferToMp3(buf, kbps) {
+  kbps = kbps || 192;
   const numCh = Math.min(2, buf.numberOfChannels);
-  const sampleRate = buf.sampleRate;
-  const enc = new lamejs.Mp3Encoder(numCh, sampleRate, kbps);
+  const enc = new lamejs.Mp3Encoder(numCh, buf.sampleRate, kbps);
   const left = buf.getChannelData(0);
   const right = numCh === 2 ? buf.getChannelData(1) : null;
-  const blockSize = 1152;
-  const samples = buf.length;
-  const out = [];
+  const blockSize = 1152; const samples = buf.length; const out = [];
   for (let i=0; i<samples; i+=blockSize) {
     const lc = new Int16Array(blockSize);
     const rc = numCh === 2 ? new Int16Array(blockSize) : null;
@@ -821,7 +823,7 @@ function bufferToWav(buf) {
   writeStr(0, "RIFF"); view.setUint32(4, 36+length, true); writeStr(8, "WAVE");
   writeStr(12, "fmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
   view.setUint16(22, numCh, true); view.setUint16(24, sampleRate, true);
-  view.setUint32(28, sampleRate*numCh*bytesPerSample, true);
+  view.setUint16(28, sampleRate*numCh*bytesPerSample, true);
   view.setUint16(32, numCh*bytesPerSample, true); view.setUint16(34, 16, true);
   writeStr(36, "data"); view.setUint32(40, length, true);
   let off = 44;
@@ -851,38 +853,39 @@ document.getElementById("exportAllBtn").onclick = async () => {
     const bufs = [];
     for (let i=0;i<STATE.segments.length;i++) {
       const s = STATE.segments[i];
-      setProgress(bar, Math.round((i/STATE.segments.length)*75), `构建BGM段${i+1}/${STATE.segments.length}（${(s.timeStart||0).toFixed(0)}-${(s.timeEnd||0).toFixed(0)}s）`);
+      setProgress(bar, Math.round((i/STATE.segments.length)*75), `构建段${i+1}/${STATE.segments.length}`);
       const segBuf = await buildSegmentBuffer(s, s.srcDur);
       if (segBuf) bufs.push(segBuf);
       await yieldUI();
     }
-    setProgress(bar, 82, `crossfade ${CROSSFADE_SEC}s 拼接...`);
+    setProgress(bar, 82, `crossfade ${CROSSFADE_SEC}s...`);
     await yieldUI();
     const mixed = await crossfadeConcatAsync(bufs, CROSSFADE_SEC);
     const beforeDur = mixed.duration;
-    // 关键：强制对齐到视频时长
-    setProgress(bar, 90, `对齐视频时长（当前${beforeDur.toFixed(1)}s → 目标${STATE.duration.toFixed(1)}s）...`);
+    setProgress(bar, 90, `对齐时长（${beforeDur.toFixed(1)}s → ${STATE.duration.toFixed(1)}s）...`);
     await yieldUI();
     const aligned = alignToDuration(mixed, STATE.duration);
     applyFade(aligned, FADE_IN, FADE_OUT);
-    let blob, ext, desc;
+    let blob, ext;
     if (EXPORT_FMT === "mp3") {
-      setProgress(bar, 95, "编码MP3...");
-      blob = bufferToMp3(aligned, 192); ext = "mp3"; desc = "MP3 192kbps";
+      setProgress(bar, 95, "编码MP3中（5-15秒，期间页面暂时无响应）...");
+      await yieldUI();
+      blob = bufferToMp3(aligned, 192); ext = "mp3";
     } else {
       setProgress(bar, 95, "打包WAV...");
-      blob = bufferToWav(aligned); ext = "wav"; desc = "WAV无损";
+      blob = bufferToWav(aligned); ext = "wav";
     }
     const fname = `BGM_${STATE.duration.toFixed(0)}s.${ext}`;
+    const alignNote = Math.abs(beforeDur-STATE.duration)>0.5 ? `，已${beforeDur>STATE.duration?"裁剪":"补静音"}${Math.abs(beforeDur-STATE.duration).toFixed(2)}s` : "";
     if (OUT_DIR) {
       const w = await OUT_DIR.getFileHandle(fname, {create:true});
       const w2 = await w.createWritable();
       await w2.write(blob); await w2.close();
-      st.textContent = `✅ 已导出到 ${OUT_DIR.name}/${fname}\n时长: ${aligned.duration.toFixed(2)}s（视频${STATE.duration.toFixed(2)}s，严格对齐）\n拼接前实际${beforeDur.toFixed(2)}s${Math.abs(beforeDur-STATE.duration)>0.5?`，已${beforeDur>STATE.duration?"裁剪":"补静音"}${Math.abs(beforeDur-STATE.duration).toFixed(2)}s`:"")`;
+      st.textContent = `✅ 已导出到 ${OUT_DIR.name}/${fname}\n时长: ${aligned.duration.toFixed(2)}s（视频${STATE.duration.toFixed(2)}s）\n拼接前${beforeDur.toFixed(2)}s${alignNote}`;
     } else {
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob); a.download = fname; a.click();
-      st.textContent = `✅ 已导出 ${fname}\n时长: ${aligned.duration.toFixed(2)}s（视频${STATE.duration.toFixed(2)}s，严格对齐）\n拼接前实际${beforeDur.toFixed(2)}s${Math.abs(beforeDur-STATE.duration)>0.5?`，已${beforeDur>STATE.duration?"裁剪":"补静音"}${Math.abs(beforeDur-STATE.duration).toFixed(2)}s`:"")`;
+      st.textContent = `✅ 已导出 ${fname}\n时长: ${aligned.duration.toFixed(2)}s（视频${STATE.duration.toFixed(2)}s）\n拼接前${beforeDur.toFixed(2)}s${alignNote}`;
     }
     setProgress(bar, 100, "完成");
   } catch(e) {
