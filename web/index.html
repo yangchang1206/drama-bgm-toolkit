@@ -19,6 +19,7 @@ button:hover { background: #4338ca; }
 button:disabled { background: #ccc; cursor: not-allowed; }
 button.secondary { background: #6b7280; }
 button.green { background: #059669; }
+button.teal { background: #0d9488; }
 .seg { padding: 8px; border: 1px solid #e5e7eb; border-radius: 4px; margin-bottom: 6px; cursor: pointer; font-size: 12px; }
 .seg:hover { background: #f3f4f6; }
 .seg.active { border-color: #4f46e5; background: #eef2ff; }
@@ -33,6 +34,7 @@ button.green { background: #059669; }
 input[type=range] { width: 100%; margin-top: 6px; }
 .pbar-wrap { margin-top: 10px; background: #e5e7eb; border-radius: 6px; overflow: hidden; height: 18px; display:none; }
 .pbar { height: 100%; background: linear-gradient(90deg,#4f46e5,#7c3aed); color:#fff; font-size:11px; line-height:18px; text-align:center; transition: width .3s; white-space:nowrap; }
+.musiclib { max-height: 300px; overflow-y: auto; margin-top: 8px; }
 @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -43,9 +45,12 @@ input[type=range] { width: 100%; margin-top: 6px; }
 <div style="padding:0 16px 12px; display:grid; grid-template-columns:1fr 1fr; gap:12px;">
   <div class="col" style="padding:10px;">
     <b>① 音乐库文件夹</b>
-    <div class="banner">自动递归扫描子文件夹，网页只在本地运行。</div>
+    <div class="banner">先选文件夹，再点分析音乐库建立索引。</div>
     <button id="pickBtn">📁 选择音乐文件夹</button>
+    <button id="analyzeLibBtn" class="teal" disabled>🎵 分析音乐库</button>
     <div id="fileInfo" class="fileinfo">未选择</div>
+    <div class="pbar-wrap" id="libPbarWrap"><div class="pbar" id="libPbar" style="width:0%">0%</div></div>
+    <div id="libList" class="musiclib"></div>
   </div>
   <div class="col" style="padding:10px;">
     <b>导出位置</b>
@@ -80,6 +85,7 @@ env.allowLocalModels = false;
 
 let EMB = [], SONG_MAP = {}, OUT_DIR = null;
 let curAudio = null;
+let LIB_READY = false;
 let STATE = { segments: [], cur: 0, duration: 0 };
 
 const MOOD_MAP = {
@@ -95,18 +101,17 @@ const MOOD_MAP = {
   "温馨/日常": ["cozy gentle acoustic guitar peaceful"],
 };
 
-function setProgress(pct, text) {
-  document.getElementById("pbarWrap").style.display = "block";
-  document.getElementById("pbar").style.width = pct + "%";
-  document.getElementById("pbar").textContent = `${pct}% ${text||""}`;
+function setProgress(el, pct, text) {
+  el.parentElement.style.display = "block";
+  el.style.width = pct + "%";
+  el.textContent = `${pct}% ${text||""}`;
 }
 
 async function loadEmb() {
   try {
     const r = await fetch("web_embeddings.json");
     EMB = await r.json();
-    document.getElementById("status").textContent = `向量库：${EMB.length} 首`;
-  } catch(e) { document.getElementById("status").textContent = "向量库加载失败"; }
+  } catch(e) {}
 }
 loadEmb();
 
@@ -124,8 +129,28 @@ document.getElementById("pickBtn").onclick = async () => {
     document.getElementById("fileInfo").textContent = "扫描中...";
     await scanDir(h, SONG_MAP);
     document.getElementById("fileInfo").textContent = `已选：${h.name}（${Object.keys(SONG_MAP).length} 首）`;
-    document.getElementById("analyzeBtn").disabled = false;
+    document.getElementById("analyzeLibBtn").disabled = false;
   } catch(e) {}
+};
+
+document.getElementById("analyzeLibBtn").onclick = async () => {
+  const n = Object.keys(SONG_MAP).length;
+  if (!n) { alert("先选文件夹"); return; }
+  const bar = document.getElementById("libPbar");
+  setProgress(bar, 5, "匹配向量库...");
+  await new Promise(r=>setTimeout(r,200));
+  // 统计：库里有多少首能在本地找到
+  let matched = 0, list = [];
+  for (const e of EMB) {
+    if (e.voc === "yes") continue;
+    if (SONG_MAP[e.fn.toLowerCase()]) { matched++; list.push(e.fn); }
+  }
+  setProgress(bar, 100, `完成：匹配 ${matched}/${EMB.filter(e=>e.voc!=='yes').length} 首纯器乐`);
+  document.getElementById("status").textContent = `音乐库就绪：本地${n}首，可搜纯器乐${matched}首`;
+  const lv = document.getElementById("libList");
+  lv.innerHTML = list.slice(0,50).map(f=>`<div class="song">🎵 ${f}</div>`).join("") + (list.length>50?`<div style="color:#888;font-size:11px;padding:4px;">...共${list.length}首</div>`:"");
+  LIB_READY = true;
+  document.getElementById("analyzeBtn").disabled = false;
 };
 
 document.getElementById("pickOutBtn").onclick = async () => {
@@ -136,17 +161,19 @@ document.getElementById("pickOutBtn").onclick = async () => {
 };
 
 document.getElementById("analyzeBtn").onclick = async () => {
+  if (!LIB_READY) { alert("请先点【分析音乐库】"); return; }
   const script = document.getElementById("script").value;
   const vf = document.getElementById("video").files[0];
   if (!script || !vf) { alert("请填剧本+选视频"); return; }
   const st = document.getElementById("status");
-  setProgress(5, "探测视频时长");
+  const bar = document.getElementById("pbar");
+  setProgress(bar, 5, "探测视频时长");
   const dur = await probeDuration(vf);
   STATE.duration = dur;
   const scenes = parseScenes(script);
   const n = scenes.length || 1;
   const segLen = dur / n;
-  setProgress(15, "加载CLAP模型");
+  setProgress(bar, 15, "加载CLAP模型");
   const txtPipe = await pipeline("feature-extraction", "Xenova/clap-htsat-unfused", {quantized: true});
 
   STATE.segments = [];
@@ -156,10 +183,10 @@ document.getElementById("analyzeBtn").onclick = async () => {
     for (const k of Object.keys(MOOD_MAP)) if (k.split("/").some(kw => text.includes(kw))) { mood = k; break; }
     const query = MOOD_MAP[mood][0];
     const pct = 20 + Math.round((i/n)*75);
-    setProgress(pct, `场${scenes[i].id} 搜曲中 (${i+1}/${n})`);
+    setProgress(bar, pct, `场${scenes[i].id} 搜曲中 (${i+1}/${n})`);
     const out = await txtPipe(query, {pooling: "mean"});
     const q = norm(out.data);
-    let scores = EMB.filter(e => e.voc !== "yes").map(e => {
+    let scores = EMB.filter(e => e.voc !== "yes" && SONG_MAP[e.fn.toLowerCase()]).map(e => {
       const eq = new Float32Array(512);
       const bin = atob(e.q);
       for (let j=0;j<512;j++) eq[j] = (bin.charCodeAt(j*2) | (bin.charCodeAt(j*2+1)<<8))/127;
@@ -170,7 +197,7 @@ document.getElementById("analyzeBtn").onclick = async () => {
     scores.sort((a,b)=>b.sim-a.sim);
     STATE.segments.push({ id: scenes[i].id, timeStart: i*segLen, timeEnd: (i+1)*segLen, mood, candidates: scores.slice(0,10), track: 0, start: 0, end: segLen+2 });
   }
-  setProgress(100, "完成");
+  setProgress(bar, 100, "完成");
   renderSegList();
   st.textContent = "✅ 完成！点中间段查看详情";
 };
