@@ -102,7 +102,7 @@ const MOOD_MAP = {
   "温暖/治愈": ["温暖 治愈 家庭 亲情 弦乐 感人"],
   "愤怒/反击": ["愤怒 反击 冲突 爆发 沉重"],
   "冷静/霸气": ["冷静 霸气 坚定 王者 沉稳 史诗"],
-  "惊喜/发现": ["惊喜 发现 奇迹 升华  uplifting 梦幻"],
+  "惊喜/发现": ["惊喜 发现 奇迹 升华 梦幻"],
   "阴谋/悬疑": ["阴谋 悬疑 神秘 低沉 诡异 紧张"],
   "回忆/怀旧": ["回忆 怀旧 怀念 钢琴 伤感 时光"],
   "温馨/日常": ["温馨 日常 轻松 吉他 平和 乡村"],
@@ -125,7 +125,8 @@ async function loadEmb() {
   try {
     const r = await fetch("web_embeddings.json");
     EMB = await r.json();
-  } catch(e) {}
+    console.log("loaded embeddings:", EMB.length);
+  } catch(e) { console.error(e); }
 }
 loadEmb();
 
@@ -173,16 +174,24 @@ document.getElementById("pickOutBtn").onclick = async () => {
   } catch(e) {}
 };
 
-// 调阿里embedding API
+// 调阿里 OpenAI 兼容 embedding API
 async function embedText(text) {
   if (!API_KEY) { alert("请先填阿里云API Key"); throw new Error("no key"); }
-  const r = await fetch("https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding", {
+  const r = await fetch("https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings", {
     method: "POST",
     headers: { "Authorization": `Bearer ${API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "text-embedding-v3", input: [text] })
+    body: JSON.stringify({ model: "text-embedding-v3", input: [text], dimensions: 1024, encoding_format: "float" })
   });
   const j = await r.json();
-  return j.output.embeddings[0].embedding;
+  return j.data[0].embedding;
+}
+
+// 解码 int8 base64 向量
+function decodeVec(b64) {
+  const bin = atob(b64);
+  const arr = new Float32Array(bin.length);
+  for (let i=0;i<bin.length;i++) arr[i] = (bin.charCodeAt(i) - 128) / 127;
+  return arr;
 }
 
 document.getElementById("analyzeBtn").onclick = async () => {
@@ -210,9 +219,9 @@ document.getElementById("analyzeBtn").onclick = async () => {
     const q = await embedText(query);
     const qn = norm(q);
     let scores = EMB.filter(e => e.voc !== "yes" && SONG_MAP[e.fn.toLowerCase()]).map(e => {
-      const en = norm(e.vec);
+      const en = norm(decodeVec(e.v));
       let s = 0; for (let j=0;j<qn.length;j++) s += qn[j]*en[j];
-      return {sim: s, ...e};
+      return {sim: s, fn: e.fn};
     });
     scores.sort((a,b)=>b.sim-a.sim);
     STATE.segments.push({ id: scenes[i].id, timeStart: i*segLen, timeEnd: (i+1)*segLen, mood, candidates: scores.slice(0,10), track: 0, start: 0, end: segLen+2 });
