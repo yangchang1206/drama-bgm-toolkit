@@ -31,6 +31,8 @@ button.green { background: #059669; }
 .player { margin-top: 10px; padding: 10px; background: #f9fafb; border-radius: 6px; }
 .player .time { display: flex; justify-content: space-between; font-size: 11px; color: #666; margin-top: 4px; }
 input[type=range] { width: 100%; margin-top: 6px; }
+.pbar-wrap { margin-top: 10px; background: #e5e7eb; border-radius: 6px; overflow: hidden; height: 18px; display:none; }
+.pbar { height: 100%; background: linear-gradient(90deg,#4f46e5,#7c3aed); color:#fff; font-size:11px; line-height:18px; text-align:center; transition: width .3s; white-space:nowrap; }
 @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -59,6 +61,7 @@ input[type=range] { width: 100%; margin-top: 6px; }
     <textarea id="script" placeholder="粘贴整集剧本（含 41-1、41-2 等场号）"></textarea>
     <input type="file" id="video" accept="video/*" style="margin-top:8px;">
     <button id="analyzeBtn" disabled>🔍 分析并自动选曲</button>
+    <div class="pbar-wrap" id="pbarWrap"><div class="pbar" id="pbar" style="width:0%">0%</div></div>
     <div id="status" class="status"></div>
   </div>
   <div class="col">
@@ -91,6 +94,12 @@ const MOOD_MAP = {
   "回忆/怀旧": ["nostalgic memory sentimental piano"],
   "温馨/日常": ["cozy gentle acoustic guitar peaceful"],
 };
+
+function setProgress(pct, text) {
+  document.getElementById("pbarWrap").style.display = "block";
+  document.getElementById("pbar").style.width = pct + "%";
+  document.getElementById("pbar").textContent = `${pct}% ${text||""}`;
+}
 
 async function loadEmb() {
   try {
@@ -131,13 +140,13 @@ document.getElementById("analyzeBtn").onclick = async () => {
   const vf = document.getElementById("video").files[0];
   if (!script || !vf) { alert("请填剧本+选视频"); return; }
   const st = document.getElementById("status");
-  st.textContent = "探测视频时长...";
+  setProgress(5, "探测视频时长");
   const dur = await probeDuration(vf);
   STATE.duration = dur;
   const scenes = parseScenes(script);
   const n = scenes.length || 1;
   const segLen = dur / n;
-  st.textContent = "加载CLAP模型（首次30秒）...";
+  setProgress(15, "加载CLAP模型");
   const txtPipe = await pipeline("feature-extraction", "Xenova/clap-htsat-unfused", {quantized: true});
 
   STATE.segments = [];
@@ -146,7 +155,8 @@ document.getElementById("analyzeBtn").onclick = async () => {
     let mood = "紧张/对峙";
     for (const k of Object.keys(MOOD_MAP)) if (k.split("/").some(kw => text.includes(kw))) { mood = k; break; }
     const query = MOOD_MAP[mood][0];
-    st.textContent = `场${scenes[i].id}搜曲...`;
+    const pct = 20 + Math.round((i/n)*75);
+    setProgress(pct, `场${scenes[i].id} 搜曲中 (${i+1}/${n})`);
     const out = await txtPipe(query, {pooling: "mean"});
     const q = norm(out.data);
     let scores = EMB.filter(e => e.voc !== "yes").map(e => {
@@ -160,6 +170,7 @@ document.getElementById("analyzeBtn").onclick = async () => {
     scores.sort((a,b)=>b.sim-a.sim);
     STATE.segments.push({ id: scenes[i].id, timeStart: i*segLen, timeEnd: (i+1)*segLen, mood, candidates: scores.slice(0,10), track: 0, start: 0, end: segLen+2 });
   }
+  setProgress(100, "完成");
   renderSegList();
   st.textContent = "✅ 完成！点中间段查看详情";
 };
