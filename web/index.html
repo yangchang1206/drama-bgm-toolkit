@@ -5,7 +5,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>BGM工作台 v2.2</title>
+<title>BGM工作台 v2.3</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
 <style>
@@ -71,7 +71,7 @@ input[type=range] { width: 100%; margin-top: 6px; }
 </head>
 <body>
 <h1>🎬 BGM 工作台</h1>
-<div class="ver">版本 v2.2 · CORS代理修复</div>
+<div class="ver">版本 v2.3 · crossfade修复+CORS代理优化</div>
 <div class="sub">纯前端 · 选音乐库 → 上传视频+剧本 → AI看图分析情绪 → 自动合并相似段 → 导出</div>
 
 <div id="globalErr"></div>
@@ -168,28 +168,25 @@ let curPreviewSource = null, curPreviewGain = null, playTimer = null, previewTok
 const CROSSFADE_SEC = 4.0, FADE_IN = 2.0, FADE_OUT = 3.0;
 const MERGE_SIM_THRESHOLD = 0.72, MAX_MUSIC_SEGMENTS = 4;
 
-// CORS代理：浏览器直接请求dashscope会被跨域拦截，通过代理中转
-const CORS_PROXIES = [
-  "https://corsproxy.io/?url=",
-  "https://api.allorigins.win/raw?url=",
-  ""
-];
-let proxyIdx = 0;
-
+// CORS代理列表（全部支持POST+自定义header）
 async function apiFetch(url, options) {
+  const proxies = [
+    u => "https://corsproxy.io/?url=" + encodeURIComponent(u),
+    u => "https://api.codetabs.com/v1/proxy/?quest=" + encodeURIComponent(u),
+    u => u
+  ];
   let lastErr = null;
-  for (let i = 0; i < CORS_PROXIES.length; i++) {
-    const proxy = CORS_PROXIES[i];
-    const fullUrl = proxy ? proxy + encodeURIComponent(url) : url;
+  for (const buildUrl of proxies) {
     try {
+      const fullUrl = buildUrl(url);
       const r = await fetch(fullUrl, options);
       return r;
     } catch(e) {
       lastErr = e;
-      console.warn("proxy", i, "failed:", e.message);
+      console.warn("proxy failed:", e.message);
     }
   }
-  throw lastErr || new Error("API请求失败");
+  throw lastErr || new Error("API请求失败（所有代理均不可用）");
 }
 
 function getCtx() { if (!actx) actx = new (window.AudioContext||window.webkitAudioContext)(); return actx; }
@@ -806,20 +803,32 @@ async function crossfadeConcatAsync(bufs, overlap) {
   for (let i=1;i<bufs.length;i++) {
     const b = bufs[i];
     const ov = Math.min(overlap, result.duration/2, b.duration/2);
-    const totalLen = Math.floor((result.duration + b.duration - ov) * result.sampleRate);
+    const ovLen = Math.floor(ov * result.sampleRate);
+    const rdLen = result.length;
+    const odLen = b.length;
+    // total = result + b - overlap
+    const totalLen = rdLen + odLen - ovLen;
     const out = ctx.createBuffer(result.numberOfChannels, totalLen, result.sampleRate);
     for (let ch=0; ch<out.numberOfChannels; ch++) {
-      const rd = result.getChannelData(ch); const od = b.getChannelData(ch); const wd = out.getChannelData(ch);
-      for (let j=0;j<rd.length;j++) wd[j] = rd[j];
-      const ovLen = Math.floor(ov*result.sampleRate);
-      const ovStart = rd.length - ovLen;
+      const rd = result.getChannelData(ch);
+      const od = b.getChannelData(ch);
+      const wd = out.getChannelData(ch);
+      // Layout:
+      // [0, rdLen - ovLen): result only
+      // [rdLen - ovLen, rdLen): overlap mixed
+      // [rdLen, totalLen): b only (from b sample ovLen onward)
+      // 1. copy result
+      for (let j=0;j<rdLen;j++) wd[j] = rd[j];
+      // 2. overlap region
       for (let j=0;j<ovLen;j++) {
-        const fo = Math.cos((j/ovLen)*Math.PI/2);
-        const fi = Math.sin((j/ovLen)*Math.PI/2);
-        wd[ovStart+j] = rd[ovStart+j]*fo + od[j]*fi;
+        const fo = Math.cos((j/ovLen)*Math.PI/2); // result fades out
+        const fi = Math.sin((j/ovLen)*Math.PI/2); // b fades in
+        wd[rdLen - ovLen + j] = rd[rdLen - ovLen + j]*fo + od[j]*fi;
       }
-      const bStart = Math.floor(ov*b.sampleRate);
-      for (let j=bStart;j<od.length;j++) wd[rd.length - ovLen + (j-bStart)] = od[j];
+      // 3. b continuation (FIXED: starts at rdLen, not rdLen-ovLen)
+      for (let j=ovLen;j<odLen;j++) {
+        wd[rdLen + (j - ovLen)] = od[j];
+      }
     }
     result = out;
     await yieldUI();
