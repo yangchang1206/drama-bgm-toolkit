@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>BGM工作台</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background: #f5f6fa; color: #222; }
+h1 { text-align: center; padding: 16px; font-size: 22px; }
+.sub { text-align: center; color: #888; font-size: 13px; margin-bottom: 16px; }
+.row { display: grid; grid-template-columns: 1fr 1.2fr 1.2fr; gap: 12px; padding: 0 16px 16px; }
+.col { background: #fff; border-radius: 8px; padding: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.col h3 { font-size: 14px; margin-bottom: 8px; }
+textarea, input { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
+textarea { min-height: 180px; resize: vertical; }
+button { padding: 8px 14px; border: none; border-radius: 4px; background: #4f46e5; color: #fff; cursor: pointer; font-size: 13px; margin-top: 8px; }
+button:hover { background: #4338ca; }
+button.secondary { background: #6b7280; }
+.seg { padding: 8px; border: 1px solid #e5e7eb; border-radius: 4px; margin-bottom: 6px; cursor: pointer; font-size: 12px; }
+.seg:hover { background: #f3f4f6; }
+.seg.active { border-color: #4f46e5; background: #eef2ff; }
+.mood { display: inline-block; background: #e0e7ff; color: #4338ca; padding: 1px 6px; border-radius: 3px; font-size: 11px; margin-left: 4px; }
+.status { font-size: 12px; color: #666; margin-top: 8px; white-space: pre-wrap; }
+.song { font-size: 12px; padding: 4px; background: #f9fafb; border-radius: 3px; margin-bottom: 3px; cursor: pointer; }
+.song.sel { background: #dbeafe; }
+audio { width: 100%; margin-top: 8px; }
+.fileinfo { font-size: 12px; color: #059669; margin-top: 4px; }
+.banner { background: #fef3c7; padding: 8px; border-radius: 4px; font-size: 12px; margin-bottom: 8px; color: #92400e; }
+@media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<h1>🎬 BGM 工作台</h1>
+<div class="sub">纯前端 · 选音乐库 → 粘贴剧本 → 自动选曲 → 导出MP3</div>
+
+<div style="padding:0 16px 12px;">
+  <div class="col" style="padding:10px;">
+    <b>① 选择你的音乐库文件夹</b>
+    <div class="banner">点按钮选择你电脑上的BGM素材文件夹。网页只在本地运行，不上传任何文件。</div>
+    <button id="pickBtn">📁 选择音乐文件夹</button>
+    <div id="fileInfo" class="fileinfo">未选择</div>
+  </div>
+</div>
+
+<div class="row">
+  <div class="col">
+    <h3>② 剧本 + 视频</h3>
+    <textarea id="script" placeholder="粘贴整集剧本（含 41-1、41-2 等场号）"></textarea>
+    <input type="file" id="video" accept="video/*" style="margin-top:8px;">
+    <button id="analyzeBtn" disabled>🔍 分析并自动选曲</button>
+    <div id="status" class="status"></div>
+  </div>
+  <div class="col">
+    <h3>③ 情绪弧线</h3>
+    <div id="segList"><div style="color:#aaa;font-size:12px;">分析后显示分段</div></div>
+  </div>
+  <div class="col">
+    <h3>④ 段详情</h3>
+    <div id="detail"><div style="color:#aaa;font-size:12px;">点左侧某段查看</div></div>
+  </div>
+</div>
+
+<script type="module">
+import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2";
+env.allowLocalModels = false;
+
+let EMB = [], FILE_HANDLE = null, SONG_MAP = {};
+let STATE = { segments: [], cur: 0, duration: 0 };
+
+const MOOD_MAP = {
+  "紧张/对峙": ["tense confrontation dark cinematic suspense"],
+  "打斗/爆发": ["intense battle action percussion epic"],
+  "悲伤/委屈": ["sad emotional piano melancholic lonely"],
+  "温暖/治愈": ["warm heartfelt strings family healing"],
+  "愤怒/反击": ["angry intense dramatic buildup"],
+  "冷静/霸气": ["calm determined cold resolve epic"],
+  "惊喜/发现": ["wonder discovery magical uplifting"],
+  "阴谋/悬疑": ["mysterious conspiracy ominous low drone"],
+  "回忆/怀旧": ["nostalgic memory sentimental piano"],
+  "温馨/日常": ["cozy gentle acoustic guitar peaceful"],
+};
+
+async function loadEmb() {
+  try {
+    const r = await fetch("web_embeddings.json");
+    EMB = await r.json();
+    for (const e of EMB) {
+      const bin = atob(e.emb);
+      const buf = new Uint16Array(bin.length/2);
+      for (let i=0;i<buf.length;i++) buf[i] = bin.charCodeAt(i*2) | (bin.charCodeAt(i*2+1)<<8);
+      e.emb32 = new Float32Array(buf.length);
+      for (let i=0;i<buf.length;i++) e.emb32[i] = buf[i]/1024;
+    }
+    document.getElementById("status").textContent = `向量库已加载：${EMB.length} 首`;
+  } catch(e) { document.getElementById("status").textContent = "向量库加载失败"; }
+}
+loadEmb();
+
+document.getElementById("pickBtn").onclick = async () => {
+  try {
+    FILE_HANDLE = await window.showDirectoryPicker();
+    SONG_MAP = {}; let count = 0;
+    for await (const entry of FILE_HANDLE.values()) {
+      if (entry.kind === "file" && /\.(mp3|wav|m4a|ogg|flac)$/i.test(entry.name)) {
+        SONG_MAP[entry.name.toLowerCase()] = entry; count++;
+      }
+    }
+    document.getElementById("fileInfo").textContent = `已选：${FILE_HANDLE.name}（${count} 首）`;
+    document.getElementById("analyzeBtn").disabled = false;
+  } catch(e) {}
+};
+
+document.getElementById("analyzeBtn").onclick = async () => {
+  const script = document.getElementById("script").value;
+  const vf = document.getElementById("video").files[0];
+  if (!script || !vf) { alert("请填剧本+选视频"); return; }
+  const st = document.getElementById("status");
+  st.textContent = "探测视频时长...";
+  const dur = await probeDuration(vf);
+  STATE.duration = dur;
+  const scenes = parseScenes(script);
+  const n = scenes.length || 1;
+  const segLen = dur / n;
+  st.textContent = "加载CLAP模型（首次30秒）...";
+  const txtPipe = await pipeline("feature-extraction", "Xenova/clap-htsat-unfused", {quantized: true});
+
+  STATE.segments = [];
+  for (let i=0;i<scenes.length;i++) {
+    const text = scenes[i].text;
+    let mood = "紧张/对峙";
+    for (const k of Object.keys(MOOD_MAP)) {
+      if (k.split("/").some(kw => text.includes(kw))) { mood = k; break; }
+    }
+    const query = MOOD_MAP[mood][0];
+    st.textContent = `场${scenes[i].id}搜曲...`;
+    const out = await txtPipe(query, {pooling: "mean"});
+    const q = norm(out.data);
+    let scores = EMB.filter(e => e.voc !== "yes").map(e => {
+      const en = norm(e.emb32);
+      let s = 0; for (let j=0;j<q.length;j++) s += q[j]*en[j];
+      return {sim: s, ...e};
+    });
+    scores.sort((a,b)=>b.sim-a.sim);
+    STATE.segments.push({ id: scenes[i].id, timeStart: i*segLen, timeEnd: (i+1)*segLen, mood, candidates: scores.slice(0,10), track: 0, start: 0, end: segLen+2 });
+  }
+  renderSegList();
+  st.textContent = "✅ 完成！点中间段查看详情";
+};
+
+function norm(a) { let s=0; for (const x of a) s+=x*x; s=Math.sqrt(s)||1; return Array.from(a).map(x=>x/s); }
+function parseScenes(text) {
+  const lines = text.split("\n"); const scenes = []; let cur = null;
+  const re = /(\d{1,3}-\d{1,3})/;
+  for (const line of lines) {
+    const m = line.match(re);
+    if (m) { if (cur) scenes.push(cur); cur = {id: m[1], text: line}; }
+    else if (cur) cur.text += "\n"+line;
+  }
+  if (cur) scenes.push(cur); return scenes;
+}
+function probeDuration(file) {
+  return new Promise(res => { const v = document.createElement("video"); v.preload="metadata"; v.onloadedmetadata=()=>res(v.duration); v.src=URL.createObjectURL(file); });
+}
+function renderSegList() {
+  const el = document.getElementById("segList"); el.innerHTML = "";
+  STATE.segments.forEach((s,i) => {
+    const d = document.createElement("div");
+    d.className = "seg" + (i===STATE.cur?" active":"");
+    d.innerHTML = `<b>${s.id}</b> <span class="mood">${s.mood}</span><br><span style="color:#666;font-size:11px;">${s.candidates[s.track].fn.slice(0,35)}</span>`;
+    d.onclick = () => { STATE.cur = i; renderSegList(); renderDetail(); };
+    el.appendChild(d);
+  });
+}
+async function renderDetail() {
+  const s = STATE.segments[STATE.cur]; if (!s) return;
+  const el = document.getElementById("detail");
+  const cur = s.candidates[s.track];
+  el.innerHTML = `<b>段 ${s.id}</b> <span class="mood">${s.mood}</span><br>
+    <div class="song sel">${cur.fn} (相似度${cur.sim.toFixed(2)})</div>
+    <div style="margin-top:8px;">
+      <label style="font-size:12px;">开始: <input type="number" id="st" value="${s.start.toFixed(1)}" step="0.5" style="width:70px;"></label>
+      <label style="font-size:12px;">结束: <input type="number" id="en" value="${s.end.toFixed(1)}" step="0.5" style="width:70px;"></label>
+    </div>
+    <div id="cands" style="margin-top:8px;"></div>
+    <button id="previewBtn">▶ 试听此段</button>
+    <div id="audioBox"></div>`;
+  const cands = document.getElementById("cands");
+  s.candidates.forEach((c,i) => {
+    const d = document.createElement("div");
+    d.className = "song" + (i===s.track?" sel":"");
+    d.textContent = `[${i}] ${c.fn.slice(0,40)} (${c.sim.toFixed(2)})`;
+    d.onclick = () => { s.track = i; renderDetail(); };
+    cands.appendChild(d);
+  });
+  document.getElementById("previewBtn").onclick = async () => {
+    s.start = parseFloat(document.getElementById("st").value);
+    s.end = parseFloat(document.getElementById("en").value);
+    const fh = SONG_MAP[cur.fn.toLowerCase()];
+    if (!fh) { alert("找不到文件："+cur.fn); return; }
+    const file = await fh.getFile();
+    document.getElementById("audioBox").innerHTML = `<audio controls src="${URL.createObjectURL(file)}#t=${s.start},${s.end}"></audio>`;
+  };
+}
+</script>
+</body>
+</html>
