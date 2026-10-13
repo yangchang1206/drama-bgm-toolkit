@@ -58,6 +58,7 @@ input[type=range] { width: 100%; margin-top: 6px; }
 .merge-info { font-size:11px; color:#6b21a8; margin-top:4px; }
 .ai-tag { display:inline-block; background:#dcfce7; color:#15803d; padding:1px 6px; border-radius:3px; font-size:10px; margin-left:4px; }
 .merge-tag { display:inline-block; background:#fce7f3; color:#be185d; padding:1px 6px; border-radius:3px; font-size:10px; margin-left:4px; }
+.loading-hint { color:#0284c7; font-size:11px; margin-left:6px; }
 @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -130,8 +131,6 @@ input[type=range] { width: 100%; margin-top: 6px; }
 
 <script>
 let EMB = [], SONG_MAP = {}, OUT_DIR = null;
-let curAudio = null;
-let playTimer = null;
 let LIB_READY = false;
 let API_KEY = localStorage.getItem("dashscope_key") || "";
 let STATE = { segments: [], cur: 0, duration: 0 };
@@ -139,6 +138,12 @@ let EXPORT_FMT = "mp3";
 let actx = null;
 let VIDEO_DUR = 0;
 let analyzeVideoEl = null;
+
+// 预览状态：用 previewToken 作废旧的异步解码任务
+let curPreviewSource = null;
+let curPreviewGain = null;
+let playTimer = null;
+let previewToken = 0;
 
 const CROSSFADE_SEC = 4.0;
 const FADE_IN = 2.0;
@@ -148,12 +153,22 @@ const MAX_MUSIC_SEGMENTS = 4;
 
 function getCtx() { if (!actx) actx = new (window.AudioContext||window.webkitAudioContext)(); return actx; }
 function yieldUI() { return new Promise(r=>setTimeout(r,0)); }
-function esc(s) { return String(s==null?"":s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;',"'":"&#39;"}[c])); }
+function esc(s) { return String(s==null?"":s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 
 function stopPreview() {
-  try { if (curAudio) curAudio.stop(); } catch(e){}
-  curAudio = null;
+  previewToken++; // 作废所有未完成的异步预览
   if (playTimer) { clearInterval(playTimer); playTimer = null; }
+  try {
+    if (curPreviewSource) { try { curPreviewSource.onended = null; curPreviewSource.stop(); } catch(e){} curPreviewSource = null; }
+    if (curPreviewGain) { try { curPreviewGain.disconnect(); } catch(e){} curPreviewGain = null; }
+  } catch(e){}
+  // 重置UI
+  const bar = document.getElementById("seekBar");
+  const ct = document.getElementById("curTime");
+  const dt = document.getElementById("durTime");
+  if (bar) bar.value = 0;
+  if (ct) ct.textContent = "0:00";
+  if (dt) dt.textContent = "0:00";
 }
 
 document.querySelectorAll(".fmt-btn").forEach(btn => {
@@ -458,7 +473,7 @@ function parseScenes(text) {
 function renderSegList() {
   const el = document.getElementById("segList");
   el.innerHTML = "";
-  if (!STATE.segments.length) { el.innerHTML = '<div style="color:#999;font-size:12px;">无分段</div>'; return; }
+  if (!STATE.segments.length) { el.innerHTML = '<div style="color:#aaa;font-size:12px;">无分段</div>'; return; }
   STATE.segments.forEach((s,i) => {
     const d = document.createElement("div");
     d.className = "seg" + (i===STATE.cur?" active":"");
@@ -496,6 +511,7 @@ async function renderDetail() {
     <div id="cands" style="margin-top:8px;"></div>
     <button id="previewBtn">▶ 播放</button>
     <button id="pauseBtn" class="secondary">⏸ 停止</button>
+    <span id="loadHint" class="loading-hint"></span>
     <div class="player">
       <input type="range" id="seekBar" min="0" max="100" value="0">
       <div class="time"><span id="curTime">0:00</span><span id="durTime">0:00</span></div>
@@ -508,34 +524,54 @@ async function renderDetail() {
     d.onclick = () => { s.track = i; stopPreview(); renderDetail(); };
     cands.appendChild(d);
   });
+  document.getElementById("pauseBtn").onclick = () => stopPreview();
   document.getElementById("previewBtn").onclick = async () => {
+    const btn = document.getElementById("previewBtn");
+    const hint = document.getElementById("loadHint");
+    const myToken = ++previewToken; // 本次预览的令牌
     stopPreview();
+    btn.disabled = true;
+    btn.textContent = "⏳ 加载...";
+    hint.textContent = "正在解码音频...";
     try {
       s.srcStart = parseFloat(document.getElementById("st").value) || 2;
       s.srcDur = parseFloat(document.getElementById("dur").value) || 30;
       const fh = SONG_MAP[cand.fn.toLowerCase()];
-      if (!fh) { alert("找不到文件："+cand.fn); return; }
+      if (!fh) throw new Error("找不到文件："+cand.fn);
+      // 异步解码期间可能用户又点了别的，检查令牌
       const buf = await decodeAudioFile(fh);
+      if (myToken !== previewToken) return; // 已被新预览作废
       const ctx = getCtx();
-      const off = s.srcStart;
-      const dur = Math.min(s.srcDur, buf.duration - off);
+      const off = Math.max(0, s.srcStart);
+      const dur = Math.min(s.srcDur, Math.max(0.1, buf.duration - off));
       const src = ctx.createBufferSource(); src.buffer = buf;
       const gain = ctx.createGain();
-      src.connect(gain).connect(ctx.destination);
+      src.connect(gain); gain.connect(ctx.destination);
       src.start(0, off, dur);
-      curAudio = src;
+      curPreviewSource = src;
+      curPreviewGain = gain;
       const bar = document.getElementById("seekBar");
       document.getElementById("durTime").textContent = fmt(dur);
       const t0 = ctx.currentTime;
+      btn.textContent = "🔄 播放中（再点停止）";
+      hint.textContent = "";
       playTimer = setInterval(() => {
+        if (myToken !== previewToken) { clearInterval(playTimer); return; }
         const t = ctx.currentTime - t0;
         bar.value = Math.min(100, (t/dur)*100);
         document.getElementById("curTime").textContent = fmt(t);
         if (t >= dur) stopPreview();
       }, 100);
-    } catch(e) { alert("解码失败："+e.message); }
+      src.onended = () => { if (myToken === previewToken) stopPreview(); };
+    } catch(e) {
+      if (myToken === previewToken) {
+        alert("解码失败："+e.message);
+        hint.textContent = "";
+      }
+    } finally {
+      if (myToken === previewToken) { btn.disabled = false; btn.textContent = "▶ 播放"; }
+    }
   };
-  document.getElementById("pauseBtn").onclick = () => stopPreview();
 }
 
 document.getElementById("analyzeBtn").onclick = async () => {
@@ -763,7 +799,7 @@ function bufferToWav(buf) {
   const writeStr = (off, s) => { for(let i=0;i<s.length;i++) view.setUint8(off+i, s.charCodeAt(i)); };
   writeStr(0, "RIFF"); view.setUint32(4, 36+length, true); writeStr(8, "WAVE");
   writeStr(12, "fmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
-  view.setUint16(22, numCh, true); view.setUint32(24, sampleRate, true);
+  view.setUint16(22, numCh, true); view.setUint16(24, sampleRate, true);
   view.setUint32(28, sampleRate*numCh*bytesPerSample, true);
   view.setUint16(32, numCh*bytesPerSample, true); view.setUint16(34, 16, true);
   writeStr(36, "data"); view.setUint32(40, length, true);
