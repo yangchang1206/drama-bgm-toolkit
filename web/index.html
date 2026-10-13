@@ -59,6 +59,7 @@ input[type=range] { width: 100%; margin-top: 6px; }
 .ai-tag { display:inline-block; background:#dcfce7; color:#15803d; padding:1px 6px; border-radius:3px; font-size:10px; margin-left:4px; }
 .merge-tag { display:inline-block; background:#fce7f3; color:#be185d; padding:1px 6px; border-radius:3px; font-size:10px; margin-left:4px; }
 .loading-hint { color:#0284c7; font-size:11px; margin-left:6px; }
+.align-info { font-size:11px; color:#b45309; margin-top:4px; }
 @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -139,7 +140,6 @@ let actx = null;
 let VIDEO_DUR = 0;
 let analyzeVideoEl = null;
 
-// 预览状态：用 previewToken 作废旧的异步解码任务
 let curPreviewSource = null;
 let curPreviewGain = null;
 let playTimer = null;
@@ -156,13 +156,12 @@ function yieldUI() { return new Promise(r=>setTimeout(r,0)); }
 function esc(s) { return String(s==null?"":s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 
 function stopPreview() {
-  previewToken++; // 作废所有未完成的异步预览
+  previewToken++;
   if (playTimer) { clearInterval(playTimer); playTimer = null; }
   try {
     if (curPreviewSource) { try { curPreviewSource.onended = null; curPreviewSource.stop(); } catch(e){} curPreviewSource = null; }
     if (curPreviewGain) { try { curPreviewGain.disconnect(); } catch(e){} curPreviewGain = null; }
   } catch(e){}
-  // 重置UI
   const bar = document.getElementById("seekBar");
   const ct = document.getElementById("curTime");
   const dt = document.getElementById("durTime");
@@ -528,7 +527,7 @@ async function renderDetail() {
   document.getElementById("previewBtn").onclick = async () => {
     const btn = document.getElementById("previewBtn");
     const hint = document.getElementById("loadHint");
-    const myToken = ++previewToken; // 本次预览的令牌
+    const myToken = ++previewToken;
     stopPreview();
     btn.disabled = true;
     btn.textContent = "⏳ 加载...";
@@ -538,9 +537,8 @@ async function renderDetail() {
       s.srcDur = parseFloat(document.getElementById("dur").value) || 30;
       const fh = SONG_MAP[cand.fn.toLowerCase()];
       if (!fh) throw new Error("找不到文件："+cand.fn);
-      // 异步解码期间可能用户又点了别的，检查令牌
       const buf = await decodeAudioFile(fh);
-      if (myToken !== previewToken) return; // 已被新预览作废
+      if (myToken !== previewToken) return;
       const ctx = getCtx();
       const off = Math.max(0, s.srcStart);
       const dur = Math.min(s.srcDur, Math.max(0.1, buf.duration - off));
@@ -670,6 +668,8 @@ document.getElementById("analyzeBtn").onclick = async () => {
       scores.sort((a,b)=>b.sim-a.sim);
       const top = scores.slice(0,10);
       if (top.length) usedSongs.add(top[0].fn);
+      // 每段素材需要的时长 = 该段视频时长 + crossfade重叠量（除最后一段）
+      const needExtra = (g < mergedGroups.length-1) ? CROSSFADE_SEC : 0;
       STATE.segments.push({
         id: grp[0].id + (grp.length>1?`+${grp.length-1}`:""),
         timeStart: gStart, timeEnd: gEnd,
@@ -678,7 +678,7 @@ document.getElementById("analyzeBtn").onclick = async () => {
         fromAI: grp[0].fromAI,
         mergedCount: grp.length,
         candidates: top, track: 0,
-        srcStart: 2, srcDur: gDur + 2.0
+        srcStart: 2, srcDur: gDur + needExtra
       });
     }
 
@@ -686,7 +686,7 @@ document.getElementById("analyzeBtn").onclick = async () => {
     await yieldUI();
     renderSegList();
     renderDetail();
-    st.textContent = `✅ 完成！镜头${n}段 → 情绪合并后${STATE.segments.length}段BGM（换歌${STATE.segments.length-1}次，crossfade ${CROSSFADE_SEC}s）。视频${dur.toFixed(1)}秒。`;
+    st.textContent = `✅ 完成！镜头${n}段 → 情绪合并后${STATE.segments.length}段BGM（换歌${STATE.segments.length-1}次，crossfade ${CROSSFADE_SEC}s）。视频${dur.toFixed(1)}秒，导出将严格对齐此时长。`;
     st.className = "status";
     setProgress(bar, 100, "完成");
     document.getElementById("exportAllBtn").disabled = false;
@@ -701,7 +701,7 @@ document.getElementById("analyzeBtn").onclick = async () => {
 function sliceBuffer(buf, off, dur) {
   const ctx = getCtx();
   const offS = Math.max(0, off);
-  const take = Math.min(dur, buf.duration - offS);
+  const take = Math.min(dur, Math.max(0.1, buf.duration - offS));
   const len = Math.max(0, Math.floor(take*buf.sampleRate));
   const out = ctx.createBuffer(buf.numberOfChannels, len, buf.sampleRate);
   for (let ch=0; ch<buf.numberOfChannels; ch++) {
@@ -763,6 +763,27 @@ async function buildSegmentBuffer(seg, neededDur) {
   if (!pieces.length) return null;
   if (pieces.length === 1) return pieces[0];
   return crossfadeConcatAsync(pieces, 1.5);
+}
+
+// 强制对齐到目标时长：长了裁，短了补静音
+function alignToDuration(buf, targetDur) {
+  const ctx = getCtx();
+  const targetLen = Math.round(targetDur * buf.sampleRate);
+  if (buf.length === targetLen) return buf;
+  if (buf.length > targetLen) {
+    // 裁掉尾部
+    const out = ctx.createBuffer(buf.numberOfChannels, targetLen, buf.sampleRate);
+    for (let ch=0; ch<buf.numberOfChannels; ch++) {
+      out.copyToChannel(buf.getChannelData(ch).subarray(0, targetLen), ch);
+    }
+    return out;
+  }
+  // 短了补静音
+  const out = ctx.createBuffer(buf.numberOfChannels, targetLen, buf.sampleRate);
+  for (let ch=0; ch<buf.numberOfChannels; ch++) {
+    out.getChannelData(ch).set(buf.getChannelData(ch), 0);
+  }
+  return out;
 }
 
 function bufferToMp3(buf, kbps=192) {
@@ -830,33 +851,38 @@ document.getElementById("exportAllBtn").onclick = async () => {
     const bufs = [];
     for (let i=0;i<STATE.segments.length;i++) {
       const s = STATE.segments[i];
-      setProgress(bar, Math.round((i/STATE.segments.length)*80), `构建BGM段${i+1}/${STATE.segments.length}（${(s.timeStart||0).toFixed(0)}-${(s.timeEnd||0).toFixed(0)}s）`);
+      setProgress(bar, Math.round((i/STATE.segments.length)*75), `构建BGM段${i+1}/${STATE.segments.length}（${(s.timeStart||0).toFixed(0)}-${(s.timeEnd||0).toFixed(0)}s）`);
       const segBuf = await buildSegmentBuffer(s, s.srcDur);
       if (segBuf) bufs.push(segBuf);
       await yieldUI();
     }
-    setProgress(bar, 88, `crossfade ${CROSSFADE_SEC}s 拼接...`);
+    setProgress(bar, 82, `crossfade ${CROSSFADE_SEC}s 拼接...`);
     await yieldUI();
     const mixed = await crossfadeConcatAsync(bufs, CROSSFADE_SEC);
-    applyFade(mixed, FADE_IN, FADE_OUT);
+    const beforeDur = mixed.duration;
+    // 关键：强制对齐到视频时长
+    setProgress(bar, 90, `对齐视频时长（当前${beforeDur.toFixed(1)}s → 目标${STATE.duration.toFixed(1)}s）...`);
+    await yieldUI();
+    const aligned = alignToDuration(mixed, STATE.duration);
+    applyFade(aligned, FADE_IN, FADE_OUT);
     let blob, ext, desc;
     if (EXPORT_FMT === "mp3") {
       setProgress(bar, 95, "编码MP3...");
-      blob = bufferToMp3(mixed, 192); ext = "mp3"; desc = "MP3 192kbps";
+      blob = bufferToMp3(aligned, 192); ext = "mp3"; desc = "MP3 192kbps";
     } else {
       setProgress(bar, 95, "打包WAV...");
-      blob = bufferToWav(mixed); ext = "wav"; desc = "WAV无损";
+      blob = bufferToWav(aligned); ext = "wav"; desc = "WAV无损";
     }
     const fname = `BGM_${STATE.duration.toFixed(0)}s.${ext}`;
     if (OUT_DIR) {
       const w = await OUT_DIR.getFileHandle(fname, {create:true});
       const w2 = await w.createWritable();
       await w2.write(blob); await w2.close();
-      st.textContent = `✅ 已导出到 ${OUT_DIR.name}/${fname}（${mixed.duration.toFixed(1)}秒，目标${STATE.duration.toFixed(1)}秒，${STATE.segments.length}段BGM）`;
+      st.textContent = `✅ 已导出到 ${OUT_DIR.name}/${fname}\n时长: ${aligned.duration.toFixed(2)}s（视频${STATE.duration.toFixed(2)}s，严格对齐）\n拼接前实际${beforeDur.toFixed(2)}s${Math.abs(beforeDur-STATE.duration)>0.5?`，已${beforeDur>STATE.duration?"裁剪":"补静音"}${Math.abs(beforeDur-STATE.duration).toFixed(2)}s`:"")`;
     } else {
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob); a.download = fname; a.click();
-      st.textContent = `✅ 已导出 ${fname}（${mixed.duration.toFixed(1)}秒，目标${STATE.duration.toFixed(1)}秒，${STATE.segments.length}段BGM，${desc}）`;
+      st.textContent = `✅ 已导出 ${fname}\n时长: ${aligned.duration.toFixed(2)}s（视频${STATE.duration.toFixed(2)}s，严格对齐）\n拼接前实际${beforeDur.toFixed(2)}s${Math.abs(beforeDur-STATE.duration)>0.5?`，已${beforeDur>STATE.duration?"裁剪":"补静音"}${Math.abs(beforeDur-STATE.duration).toFixed(2)}s`:"")`;
     }
     setProgress(bar, 100, "完成");
   } catch(e) {
