@@ -21,6 +21,7 @@ button:disabled { background: #ccc; cursor: not-allowed; }
 button.secondary { background: #6b7280; }
 button.green { background: #059669; }
 button.teal { background: #0d9488; }
+button.purple { background: #7c3aed; }
 .seg { padding: 8px; border: 1px solid #e5e7eb; border-radius: 4px; margin-bottom: 6px; cursor: pointer; font-size: 12px; }
 .seg:hover { background: #f3f4f6; }
 .seg.active { border-color: #4f46e5; background: #eef2ff; }
@@ -52,12 +53,13 @@ input[type=range] { width: 100%; margin-top: 6px; }
 .tp-row { margin-top:8px; font-size:12px; color:#666; }
 .tp-row input { margin-top:4px; font-family:Consolas,monospace; font-size:12px; }
 .video-info { font-size:12px; color:#059669; margin-top:4px; }
+.detect-box { margin-top:6px; padding:8px; background:#f5f3ff; border-radius:6px; font-size:12px; }
 @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
 <h1>🎬 BGM 工作台</h1>
-<div class="sub">纯前端 · 选音乐库 → 粘贴剧本 → 自动选曲 → 导出MP3/WAV</div>
+<div class="sub">纯前端 · 选音乐库 → 上传视频+剧本 → 自动检测镜头 → 自动选曲 → 导出</div>
 
 <div class="api-box">
   <label>🔑 阿里云API Key:</label>
@@ -91,9 +93,13 @@ input[type=range] { width: 100%; margin-top: 6px; }
     <textarea id="script" placeholder="粘贴整集剧本（含 35-1、35-2 等场号）"></textarea>
     <input type="file" id="video" accept="video/*" style="margin-top:8px;">
     <div id="videoInfo" class="video-info">未选视频</div>
+    <div class="detect-box">
+      <button id="detectBtn" class="purple" disabled>🎬 自动检测镜头切换点</button>
+      <div style="font-size:11px;color:#6b21a8;margin-top:4px;">本地抽帧+帧差分析，视频不上传。检测完自动填下面输入框。</div>
+    </div>
     <div class="tp-row">
-      <label>🎯 镜头切换点（可选，从剪映里看真实转场秒数）:</label>
-      <input type="text" id="timepoints" placeholder="留空=按剧本场号均分；填示例: 0-42, 42-108（最后一段自动补到视频末尾）">
+      <label>🎯 镜头切换点（自动检测后可手改）:</label>
+      <input type="text" id="timepoints" placeholder="示例: 0-4.2, 4.2-18.5, 18.5-108（最后一段自动补到视频末尾）">
     </div>
     <button id="analyzeBtn" disabled>🔍 分析并自动选曲</button>
     <div class="fmt-row">
@@ -126,6 +132,7 @@ let API_KEY = localStorage.getItem("dashscope_key") || "";
 let STATE = { segments: [], cur: 0, duration: 0 };
 let EXPORT_FMT = "mp3";
 let actx = null;
+let VIDEO_DUR = 0;
 
 function getCtx() { if (!actx) actx = new (window.AudioContext||window.webkitAudioContext)(); return actx; }
 
@@ -265,8 +272,6 @@ function analyzeMood(text) {
 }
 
 function parseTimepoints(str, totalDur) {
-  // "0-42, 42-108" -> [{start:0,end:42},{start:42,end:108}]
-  // 最后一段 end 自动补到 totalDur
   const parts = str.split(/[,，;；]/).map(s=>s.trim()).filter(Boolean);
   const segs = [];
   for (const p of parts) {
@@ -288,7 +293,86 @@ document.getElementById("video").onchange = async (e) => {
   const f = e.target.files[0];
   if (!f) return;
   const d = await probeDuration(f);
+  VIDEO_DUR = d;
   document.getElementById("videoInfo").textContent = `✅ 视频时长: ${d.toFixed(1)} 秒（${(d/60).toFixed(1)} 分钟）`;
+  document.getElementById("detectBtn").disabled = false;
+};
+
+// ===== 自动镜头切换检测：本地抽帧 + 帧差 =====
+async function detectScenes(file, onProgress) {
+  return new Promise((resolve) => {
+    const video = document.createElement("video");
+    video.preload = "auto";
+    video.muted = true;
+    video.src = URL.createObjectURL(file);
+    const W = 160, H = 90;
+    const canvas = document.createElement("canvas");
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+    const STEP = 0.4; // 每0.4秒抽一帧
+    const THRESHOLD = 22; // MSE阈值（0-255尺度），越大越不敏感
+    const MIN_GAP = 1.5; // 两次切换最小间隔秒数
+
+    video.onloadedmetadata = async () => {
+      const dur = video.duration;
+      const times = [];
+      for (let t = 0.5; t < dur - 0.3; t += STEP) times.push(t);
+      let prevData = null;
+      const cuts = [0];
+      for (let i = 0; i < times.length; i++) {
+        const t = times[i];
+        await new Promise(r => {
+          video.currentTime = t;
+          video.onseeked = () => {
+            ctx.drawImage(video, 0, 0, W, H);
+            const d = ctx.getImageData(0, 0, W, H).data;
+            if (prevData) {
+              let sum = 0, n = d.length / 4;
+              for (let j = 0; j < d.length; j += 4) {
+                const dr = d[j] - prevData[j];
+                const dg = d[j+1] - prevData[j+1];
+                const db = d[j+2] - prevData[j+2];
+                sum += dr*dr + dg*dg + db*db;
+              }
+              const mse = sum / (n * 3);
+              if (mse > THRESHOLD) {
+                const lastCut = cuts[cuts.length-1];
+                if (t - lastCut > MIN_GAP) cuts.push(t);
+              }
+            }
+            prevData = d;
+            onProgress && onProgress((i+1)/times.length, t);
+            r();
+          };
+        });
+      }
+      cuts.push(dur);
+      resolve(cuts);
+    };
+  });
+}
+
+document.getElementById("detectBtn").onclick = async () => {
+  const vf = document.getElementById("video").files[0];
+  if (!vf) { alert("先选视频"); return; }
+  const btn = document.getElementById("detectBtn");
+  btn.disabled = true; btn.textContent = "🎬 检测中...";
+  const bar = document.getElementById("pbar");
+  try {
+    const cuts = await detectScenes(vf, (p, t) => {
+      setProgress(bar, Math.round(p*100), `抽帧分析 ${t.toFixed(1)}s`);
+    });
+    const segs = [];
+    for (let i=0;i<cuts.length-1;i++) segs.push(`${cuts[i].toFixed(1)}-${cuts[i+1].toFixed(1)}`);
+    document.getElementById("timepoints").value = segs.join(", ");
+    document.getElementById("status").textContent = `✅ 检测到 ${cuts.length-1} 个镜头段，已自动填入。可手改后点【分析并自动选曲】`;
+    btn.textContent = "🎬 重新检测";
+    btn.disabled = false;
+  } catch(e) {
+    alert("检测失败："+e.message);
+    btn.disabled = false; btn.textContent = "🎬 自动检测镜头切换点";
+  }
 };
 
 document.getElementById("analyzeBtn").onclick = async () => {
@@ -301,18 +385,24 @@ document.getElementById("analyzeBtn").onclick = async () => {
   setProgress(bar, 5, "探测视频时长");
   const dur = await probeDuration(vf);
   STATE.duration = dur;
+  VIDEO_DUR = dur;
   document.getElementById("videoInfo").textContent = `✅ 视频时长: ${dur.toFixed(1)} 秒`;
 
   const scenes = parseScenes(script);
   const tpStr = document.getElementById("timepoints").value.trim();
   let timeSegs = tpStr ? parseTimepoints(tpStr, dur) : null;
 
-  // 构造分段：timeSegs 优先；否则按剧本场号均分
+  // 构造分段
   let segDefs = [];
   if (timeSegs && timeSegs.length) {
+    // 按时间比例把剧本文本分配到每个镜头段
     for (let i=0;i<timeSegs.length;i++) {
-      const sc = scenes[Math.min(i, scenes.length-1)] || {id: `seg${i+1}`, text: script};
-      segDefs.push({ id: sc.id, start: timeSegs[i].start, end: timeSegs[i].end, text: sc.text });
+      const s = timeSegs[i].start, e = timeSegs[i].end;
+      // 找对应时间比例的剧本场：把整个剧本平均分给所有镜头段
+      const ratio = scenes.length ? i / Math.max(1, timeSegs.length - 1) : 0;
+      const scIdx = Math.min(scenes.length - 1, Math.floor(ratio * scenes.length));
+      const sc = scenes[Math.max(0, scIdx)] || {id: `seg${i+1}`, text: script};
+      segDefs.push({ id: sc.id, start: s, end: e, text: sc.text });
     }
   } else {
     const n = scenes.length || 1;
@@ -330,7 +420,7 @@ document.getElementById("analyzeBtn").onclick = async () => {
     const s = segDefs[i];
     const segDur = s.end - s.start;
     const { mood, query } = analyzeMood(s.text);
-    setProgress(bar, 10 + Math.round((i/n)*85), `场${s.id} [${mood}] ${s.start.toFixed(0)}-${s.end.toFixed(0)}s 搜曲中 (${i+1}/${n})`);
+    setProgress(bar, 10 + Math.round((i/n)*85), `段${i+1} [${mood}] ${s.start.toFixed(0)}-${s.end.toFixed(0)}s 搜曲中 (${i+1}/${n})`);
     const q = await embedText(query);
     const qn = norm(q);
     let scores = EMB.filter(e => e.voc !== "yes" && SONG_MAP[e.fn.toLowerCase()] && !usedSongs.has(e.fn))
@@ -338,12 +428,12 @@ document.getElementById("analyzeBtn").onclick = async () => {
     scores.sort((a,b)=>b.sim-a.sim);
     const top = scores.slice(0,10);
     if (top.length) usedSongs.add(top[0].fn);
-    STATE.segments.push({ id: s.id, timeStart: s.start, timeEnd: s.end, mood, query, candidates: top, track: 0, srcStart: 2, srcDur: segDur+1.5 });
+    STATE.segments.push({ id: s.id+"#"+(i+1), timeStart: s.start, timeEnd: s.end, mood, query, candidates: top, track: 0, srcStart: 2, srcDur: segDur+1.5 });
   }
   setProgress(bar, 100, "完成");
   renderSegList();
   renderDetail();
-  st.textContent = `✅ 完成！共${n}段，视频${dur.toFixed(1)}秒。${timeSegs?'（按你填的镜头切换点对齐）':'（按剧本场号均分，可填镜头切换点更准）'}点③里的段可切换试听。`;
+  st.textContent = `✅ 完成！共${n}段，视频${dur.toFixed(1)}秒。${timeSegs?'（按镜头切换点对齐）':'（按剧本场号均分）'}点③里的段可切换试听。`;
   document.getElementById("exportAllBtn").disabled = false;
 };
 
@@ -363,7 +453,7 @@ function renderSegList() {
   STATE.segments.forEach((s,i) => {
     const d = document.createElement("div");
     d.className = "seg" + (i===STATE.cur?" active":"");
-    d.innerHTML = `<b>${s.id}</b> <span class="mood">${s.mood}</span><br><span style="color:#666;font-size:11px;">${s.timeStart.toFixed(0)}-${s.timeEnd.toFixed(0)}s · ${s.candidates[s.track]?.fn?.slice(0,30)||"无"}</span>`;
+    d.innerHTML = `<b>${s.id}</b> <span class="mood">${s.mood}</span><br><span style="color:#666;font-size:11px;">${s.timeStart.toFixed(0)}-${s.timeEnd.toFixed(0)}s · ${s.candidates[s.track]?.fn?.slice(0,28)||"无"}</span>`;
     d.onclick = () => { STATE.cur = i; stopPreview(); renderSegList(); renderDetail(); };
     el.appendChild(d);
   });
@@ -559,7 +649,7 @@ document.getElementById("exportAllBtn").onclick = async () => {
   const bufs = [];
   for (let i=0;i<STATE.segments.length;i++) {
     const s = STATE.segments[i];
-    setProgress(bar, Math.round((i/STATE.segments.length)*80), `构建${s.id}（不够自动接下一首）`);
+    setProgress(bar, Math.round((i/STATE.segments.length)*80), `构建段${i+1}（不够自动接下一首）`);
     const segBuf = await buildSegmentBuffer(s, s.srcDur);
     if (segBuf) bufs.push(segBuf);
   }
