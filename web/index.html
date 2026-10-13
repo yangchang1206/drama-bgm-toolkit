@@ -35,12 +35,21 @@ input[type=range] { width: 100%; margin-top: 6px; }
 .pbar-wrap { margin-top: 10px; background: #e5e7eb; border-radius: 6px; overflow: hidden; height: 18px; display:none; }
 .pbar { height: 100%; background: linear-gradient(90deg,#4f46e5,#7c3aed); color:#fff; font-size:11px; line-height:18px; text-align:center; transition: width .3s; white-space:nowrap; }
 .musiclib { max-height: 300px; overflow-y: auto; margin-top: 8px; }
+.api-box { background:#fff; border-radius:8px; padding:10px 16px; margin:0 16px 12px; display:flex; gap:8px; align-items:center; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+.api-box label { font-size:12px; color:#666; white-space:nowrap; }
+.api-box input { flex:1; font-size:12px; }
 @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
 <h1>🎬 BGM 工作台</h1>
 <div class="sub">纯前端 · 选音乐库 → 粘贴剧本 → 自动选曲 → 导出MP3</div>
+
+<div class="api-box">
+  <label>🔑 阿里云API Key:</label>
+  <input type="password" id="apiKey" placeholder="sk-... （存在浏览器本地，不上传）">
+  <button id="saveKeyBtn" class="secondary" style="margin-top:0;">保存</button>
+</div>
 
 <div style="padding:0 16px 12px; display:grid; grid-template-columns:1fr 1fr; gap:12px;">
   <div class="col" style="padding:10px;">
@@ -79,26 +88,31 @@ input[type=range] { width: 100%; margin-top: 6px; }
   </div>
 </div>
 
-<script type="module">
-import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2";
-env.allowLocalModels = false;
-
+<script>
 let EMB = [], SONG_MAP = {}, OUT_DIR = null;
 let curAudio = null;
 let LIB_READY = false;
+let API_KEY = localStorage.getItem("dashscope_key") || "";
 let STATE = { segments: [], cur: 0, duration: 0 };
 
 const MOOD_MAP = {
-  "紧张/对峙": ["tense confrontation dark cinematic suspense"],
-  "打斗/爆发": ["intense battle action percussion epic"],
-  "悲伤/委屈": ["sad emotional piano melancholic lonely"],
-  "温暖/治愈": ["warm heartfelt strings family healing"],
-  "愤怒/反击": ["angry intense dramatic buildup"],
-  "冷静/霸气": ["calm determined cold resolve epic"],
-  "惊喜/发现": ["wonder discovery magical uplifting"],
-  "阴谋/悬疑": ["mysterious conspiracy ominous low drone"],
-  "回忆/怀旧": ["nostalgic memory sentimental piano"],
-  "温馨/日常": ["cozy gentle acoustic guitar peaceful"],
+  "紧张/对峙": ["紧张 对峙 压迫 危险 黑暗 悬疑"],
+  "打斗/爆发": ["激烈 动作 打斗 高潮 节奏快 鼓点"],
+  "悲伤/委屈": ["悲伤 委屈 难过 钢琴 孤独 催泪"],
+  "温暖/治愈": ["温暖 治愈 家庭 亲情 弦乐 感人"],
+  "愤怒/反击": ["愤怒 反击 冲突 爆发 沉重"],
+  "冷静/霸气": ["冷静 霸气 坚定 王者 沉稳 史诗"],
+  "惊喜/发现": ["惊喜 发现 奇迹 升华  uplifting 梦幻"],
+  "阴谋/悬疑": ["阴谋 悬疑 神秘 低沉 诡异 紧张"],
+  "回忆/怀旧": ["回忆 怀旧 怀念 钢琴 伤感 时光"],
+  "温馨/日常": ["温馨 日常 轻松 吉他 平和 乡村"],
+};
+
+document.getElementById("apiKey").value = API_KEY;
+document.getElementById("saveKeyBtn").onclick = () => {
+  API_KEY = document.getElementById("apiKey").value.trim();
+  localStorage.setItem("dashscope_key", API_KEY);
+  alert("已保存");
 };
 
 function setProgress(el, pct, text) {
@@ -139,7 +153,6 @@ document.getElementById("analyzeLibBtn").onclick = async () => {
   const bar = document.getElementById("libPbar");
   setProgress(bar, 5, "匹配向量库...");
   await new Promise(r=>setTimeout(r,200));
-  // 统计：库里有多少首能在本地找到
   let matched = 0, list = [];
   for (const e of EMB) {
     if (e.voc === "yes") continue;
@@ -160,6 +173,18 @@ document.getElementById("pickOutBtn").onclick = async () => {
   } catch(e) {}
 };
 
+// 调阿里embedding API
+async function embedText(text) {
+  if (!API_KEY) { alert("请先填阿里云API Key"); throw new Error("no key"); }
+  const r = await fetch("https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding", {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "text-embedding-v3", input: [text] })
+  });
+  const j = await r.json();
+  return j.output.embeddings[0].embedding;
+}
+
 document.getElementById("analyzeBtn").onclick = async () => {
   if (!LIB_READY) { alert("请先点【分析音乐库】"); return; }
   const script = document.getElementById("script").value;
@@ -173,8 +198,6 @@ document.getElementById("analyzeBtn").onclick = async () => {
   const scenes = parseScenes(script);
   const n = scenes.length || 1;
   const segLen = dur / n;
-  setProgress(bar, 15, "加载CLAP模型");
-  const txtPipe = await pipeline("feature-extraction", "Xenova/clap-htsat-unfused", {quantized: true});
 
   STATE.segments = [];
   for (let i=0;i<scenes.length;i++) {
@@ -182,16 +205,13 @@ document.getElementById("analyzeBtn").onclick = async () => {
     let mood = "紧张/对峙";
     for (const k of Object.keys(MOOD_MAP)) if (k.split("/").some(kw => text.includes(kw))) { mood = k; break; }
     const query = MOOD_MAP[mood][0];
-    const pct = 20 + Math.round((i/n)*75);
+    const pct = 10 + Math.round((i/n)*85);
     setProgress(bar, pct, `场${scenes[i].id} 搜曲中 (${i+1}/${n})`);
-    const out = await txtPipe(query, {pooling: "mean"});
-    const q = norm(out.data);
+    const q = await embedText(query);
+    const qn = norm(q);
     let scores = EMB.filter(e => e.voc !== "yes" && SONG_MAP[e.fn.toLowerCase()]).map(e => {
-      const eq = new Float32Array(512);
-      const bin = atob(e.q);
-      for (let j=0;j<512;j++) eq[j] = (bin.charCodeAt(j*2) | (bin.charCodeAt(j*2+1)<<8))/127;
-      const en = norm(eq);
-      let s = 0; for (let j=0;j<q.length;j++) s += q[j]*en[j];
+      const en = norm(e.vec);
+      let s = 0; for (let j=0;j<qn.length;j++) s += qn[j]*en[j];
       return {sim: s, ...e};
     });
     scores.sort((a,b)=>b.sim-a.sim);
@@ -202,7 +222,7 @@ document.getElementById("analyzeBtn").onclick = async () => {
   st.textContent = "✅ 完成！点中间段查看详情";
 };
 
-function norm(a) { let s=0; for (const x of a) s+=x*x; s=Math.sqrt(s)||1; return Array.from(a).map(x=>x/s); }
+function norm(a) { let s=0; for (const x of a) s+=x*x; s=Math.sqrt(s)||1; return a.map(x=>x/s); }
 function parseScenes(text) {
   const lines = text.split("\n"); const scenes = []; let cur = null;
   const re = /(\d{1,3}-\d{1,3})/;
@@ -254,7 +274,6 @@ async function renderDetail() {
     d.onclick = () => { s.track = i; renderDetail(); };
     cands.appendChild(d);
   });
-
   document.getElementById("previewBtn").onclick = async () => {
     s.start = parseFloat(document.getElementById("st").value);
     s.end = parseFloat(document.getElementById("en").value);
@@ -272,9 +291,7 @@ async function renderDetail() {
       document.getElementById("curTime").textContent = fmt(curAudio.currentTime - s.start);
       if (curAudio.currentTime >= s.end) curAudio.pause();
     };
-    curAudio.onloadedmetadata = () => {
-      document.getElementById("durTime").textContent = fmt(s.end - s.start);
-    };
+    curAudio.onloadedmetadata = () => { document.getElementById("durTime").textContent = fmt(s.end - s.start); };
     bar.oninput = () => { curAudio.currentTime = s.start + (bar.value/100)*(s.end-s.start); };
   };
   document.getElementById("pauseBtn").onclick = () => { if (!curAudio) return; if (curAudio.paused) curAudio.play(); else curAudio.pause(); };
