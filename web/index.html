@@ -216,7 +216,7 @@ async function embedText(text) {
   if (!API_KEY) { alert("请先填阿里云API Key"); throw new Error("no key"); }
   const r = await fetch("https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings", {
     method: "POST",
-    headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
+    headers: { "Authorization": `Bearer ${API_KEY}`, "Content-Type": "application/json" },
     body: JSON.stringify({ model: "text-embedding-v3", input: [text], dimensions: 1024, encoding_format: "float" })
   });
   const j = await r.json();
