@@ -223,20 +223,56 @@ function setProgress(el, pct, text) {
   el.textContent = `${pct}% ${text||""}`;
 }
 
+async function fetchWithProgress(url, onProgress) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error("HTTP "+resp.status);
+  const reader = resp.body.getReader();
+  const total = parseInt(resp.headers.get("content-length")||"0");
+  let received = 0; const chunks = [];
+  while (true) {
+    const {done, value} = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    if (onProgress) onProgress(received, total);
+  }
+  const blob = new Blob(chunks);
+  return await blob.text();
+}
+
 async function loadEmb() {
   const rb = document.getElementById("readyBar");
-  try {
-    rb.textContent = "⏳ 正在下载向量索引（7.4MB）...";
-    const r = await fetch("web_embeddings.json");
-    if (!r.ok) throw new Error("HTTP "+r.status);
-    rb.textContent = "⏳ 正在解析...";
-    EMB = await r.json();
-    const inst = EMB.filter(e=>e.voc!=="yes").length;
-    rb.innerHTML = `✅ <b>页面就绪</b>：共${EMB.length}首，纯器乐${inst}首。`;
-  } catch(e) {
-    rb.innerHTML = `⚠️ 向量库加载失败：${e.message}（其他功能仍可用）`;
-    rb.style.background = "#fef3c7"; rb.style.color = "#92400e";
+  const urls = [
+    "https://cdn.jsdelivr.net/gh/yangchang1206/drama-bgm-toolkit@main/web/web_embeddings.json",
+    "web_embeddings.json"
+  ];
+  let lastErr = null;
+  for (const url of urls) {
+    try {
+      rb.textContent = "⏳ 正在从CDN下载向量索引（7.4MB）... 0%";
+      rb.style.background = "#fef3c7"; rb.style.color = "#92400e";
+      const text = await fetchWithProgress(url, (rec, tot) => {
+        if (tot) {
+          const pct = Math.round(rec/tot*100);
+          const mb = (rec/1048576).toFixed(1);
+          rb.textContent = `⏳ 正在下载向量索引... ${pct}%（${mb}MB）`;
+        } else {
+          rb.textContent = `⏳ 正在下载... ${(rec/1048576).toFixed(1)}MB`;
+        }
+      });
+      rb.textContent = "⏳ 正在解析向量索引...";
+      EMB = JSON.parse(text);
+      const inst = EMB.filter(e=>e.voc!=="yes").length;
+      rb.innerHTML = `✅ <b>页面就绪</b>：共${EMB.length}首，纯器乐${inst}首。`;
+      rb.style.background = "#dcfce7"; rb.style.color = "#15803d";
+      return;
+    } catch(e) {
+      lastErr = e;
+      console.warn("fetch failed:", url, e);
+    }
   }
+  rb.innerHTML = `⚠️ 向量库加载失败：${lastErr?.message||"unknown"}。请检查网络后刷新。`;
+  rb.style.background = "#fef3c7"; rb.style.color = "#92400e";
 }
 loadEmb();
 
