@@ -369,8 +369,10 @@ async function renderDetail() {
 
 function sliceBuffer(buf, off, dur) {
   const ctx = getCtx();
-  const offS = Math.max(0, off), endS = Math.min(buf.duration, off+dur);
-  const len = Math.max(0, Math.floor((endS-offS)*buf.sampleRate));
+  const offS = Math.max(0, off);
+  const avail = buf.duration - offS;
+  const take = Math.min(dur, avail);
+  const len = Math.max(0, Math.floor(take*buf.sampleRate));
   const out = ctx.createBuffer(buf.numberOfChannels, len, buf.sampleRate);
   for (let ch=0; ch<buf.numberOfChannels; ch++) {
     const d = buf.getChannelData(ch);
@@ -408,6 +410,30 @@ function crossfadeConcat(bufs, overlap=2.0) {
     result = out;
   }
   return result;
+}
+
+// 凑够一段需要的时长：第一首不够就接同段下一首候选
+async function buildSegmentBuffer(seg, neededDur) {
+  const pieces = [];
+  let filled = 0;
+  const used = new Set();
+  for (let i=0; i<seg.candidates.length && filled < neededDur; i++) {
+    const c = seg.candidates[i];
+    if (used.has(c.fn)) continue;
+    const fh = SONG_MAP[c.fn.toLowerCase()];
+    if (!fh) continue;
+    try {
+      const full = await decodeAudioFile(fh);
+      const remain = neededDur - filled;
+      // 从该曲开头偏后一点截，截最多 remain+1 秒（给crossfade留余量）
+      const piece = sliceBuffer(full, 2, remain + 1.5);
+      pieces.push(piece);
+      filled += piece.duration;
+      used.add(c.fn);
+    } catch(e) { console.warn("decode fail", c.fn, e); }
+  }
+  if (!pieces.length) return null;
+  return crossfadeConcat(pieces, 1.5);
 }
 
 function bufferToMp3(buf, kbps=192) {
@@ -473,13 +499,9 @@ document.getElementById("exportAllBtn").onclick = async () => {
   const bufs = [];
   for (let i=0;i<STATE.segments.length;i++) {
     const s = STATE.segments[i];
-    const cur = s.candidates[s.track];
-    if (!cur) continue;
-    const fh = SONG_MAP[cur.fn.toLowerCase()];
-    if (!fh) { continue; }
-    setProgress(bar, Math.round((i/STATE.segments.length)*80), `解码${s.id}`);
-    const full = await decodeAudioFile(fh);
-    bufs.push(sliceBuffer(full, s.srcStart, s.srcDur));
+    setProgress(bar, Math.round((i/STATE.segments.length)*80), `构建${s.id}（不够自动接下一首）`);
+    const segBuf = await buildSegmentBuffer(s, s.srcDur);
+    if (segBuf) bufs.push(segBuf);
   }
   setProgress(bar, 88, "crossfade拼接...");
   await new Promise(r=>setTimeout(r,100));
@@ -498,7 +520,7 @@ document.getElementById("exportAllBtn").onclick = async () => {
     const w = await OUT_DIR.getFileHandle(fname, {create:true});
     const w2 = await w.createWritable();
     await w2.write(blob); await w2.close();
-    st.textContent = `✅ 已导出到 ${OUT_DIR.name}/${fname}`;
+    st.textContent = `✅ 已导出到 ${OUT_DIR.name}/${fname}（${mixed.duration.toFixed(1)}秒）`;
   } else {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob); a.download = fname; a.click();
