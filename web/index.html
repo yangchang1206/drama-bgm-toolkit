@@ -46,7 +46,9 @@ input[type=range] { width: 100%; margin-top: 6px; }
 .query-box { background:#f0f9ff; border-left:3px solid #0284c7; padding:6px 8px; margin-top:6px; font-size:11px; color:#075985; }
 .fmt-row { display:flex; gap:8px; align-items:center; margin-top:10px; }
 .fmt-row label { font-size:12px; color:#666; white-space:nowrap; }
-.fmt-row select { flex:1; }
+.fmt-btns { display:flex; gap:6px; flex:1; }
+.fmt-btn { flex:1; padding:8px; border:2px solid #ddd; background:#f9fafb; color:#666; border-radius:6px; cursor:pointer; font-size:13px; margin-top:0; }
+.fmt-btn.on { border-color:#4f46e5; background:#eef2ff; color:#4338ca; font-weight:bold; }
 @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -88,10 +90,10 @@ input[type=range] { width: 100%; margin-top: 6px; }
     <button id="analyzeBtn" disabled>🔍 分析并自动选曲</button>
     <div class="fmt-row">
       <label>导出格式:</label>
-      <select id="fmtSelect">
-        <option value="mp3">MP3（192kbps，推荐）</option>
-        <option value="wav">WAV（无损，文件大）</option>
-      </select>
+      <div class="fmt-btns">
+        <button class="fmt-btn on" data-fmt="mp3">🎵 MP3（推荐）</button>
+        <button class="fmt-btn" data-fmt="wav">📼 WAV（无损）</button>
+      </div>
     </div>
     <button id="exportAllBtn" class="export-btn green" disabled>💾 导出整集BGM</button>
     <div class="pbar-wrap" id="pbarWrap"><div class="pbar" id="pbar" style="width:0%">0%</div></div>
@@ -113,9 +115,18 @@ let curAudio = null;
 let LIB_READY = false;
 let API_KEY = localStorage.getItem("dashscope_key") || "";
 let STATE = { segments: [], cur: 0, duration: 0 };
+let EXPORT_FMT = "mp3";
 let actx = null;
 
 function getCtx() { if (!actx) actx = new (window.AudioContext||window.webkitAudioContext)(); return actx; }
+
+document.querySelectorAll(".fmt-btn").forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll(".fmt-btn").forEach(b => b.classList.remove("on"));
+    btn.classList.add("on");
+    EXPORT_FMT = btn.dataset.fmt;
+  };
+});
 
 document.getElementById("apiKey").value = API_KEY;
 document.getElementById("saveKeyBtn").onclick = () => {
@@ -253,6 +264,7 @@ document.getElementById("analyzeBtn").onclick = async () => {
   const n = scenes.length || 1;
   const segLen = dur / n;
   STATE.segments = [];
+  STATE.cur = 0;
   const usedSongs = new Set();
   for (let i=0;i<scenes.length;i++) {
     const { mood, query } = analyzeMood(scenes[i].text);
@@ -268,7 +280,8 @@ document.getElementById("analyzeBtn").onclick = async () => {
   }
   setProgress(bar, 100, "完成");
   renderSegList();
-  st.textContent = `✅ 完成！共${n}段，视频${dur.toFixed(1)}秒。点段查看，最后导出。`;
+  renderDetail();
+  st.textContent = `✅ 完成！共${n}段，视频${dur.toFixed(1)}秒。点③里的段可切换试听，最后导出。`;
   document.getElementById("exportAllBtn").disabled = false;
 };
 
@@ -301,6 +314,7 @@ async function renderDetail() {
   const s = STATE.segments[STATE.cur]; if (!s) return;
   if (curAudio) { try{curAudio.stop();}catch(e){} curAudio = null; }
   const el = document.getElementById("detail");
+  if (!s.candidates[s.track]) { el.innerHTML = "<div style='color:#999;font-size:12px;'>该段无候选曲</div>"; return; }
   const cur = s.candidates[s.track];
   el.innerHTML = `<b>段 ${s.id}</b> <span class="mood">${s.mood}</span><br>
     <div class="query-box">🔍 ${s.query}</div>
@@ -456,7 +470,6 @@ document.getElementById("exportAllBtn").onclick = async () => {
   if (!STATE.segments.length) { alert("请先分析"); return; }
   const bar = document.getElementById("pbar");
   const st = document.getElementById("status");
-  const fmt = document.getElementById("fmtSelect").value;
   const bufs = [];
   for (let i=0;i<STATE.segments.length;i++) {
     const s = STATE.segments[i];
@@ -473,7 +486,7 @@ document.getElementById("exportAllBtn").onclick = async () => {
   const mixed = crossfadeConcat(bufs, 2.0);
   applyFade(mixed, 2.0, 2.0);
   let blob, ext, desc;
-  if (fmt === "mp3") {
+  if (EXPORT_FMT === "mp3") {
     setProgress(bar, 95, "编码MP3...");
     blob = bufferToMp3(mixed, 192); ext = "mp3"; desc = "MP3 192kbps";
   } else {
