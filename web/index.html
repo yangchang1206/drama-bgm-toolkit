@@ -112,6 +112,7 @@ input[type=range] { width: 100%; margin-top: 6px; }
 <script>
 let EMB = [], SONG_MAP = {}, OUT_DIR = null;
 let curAudio = null;
+let playTimer = null;
 let LIB_READY = false;
 let API_KEY = localStorage.getItem("dashscope_key") || "";
 let STATE = { segments: [], cur: 0, duration: 0 };
@@ -119,6 +120,11 @@ let EXPORT_FMT = "mp3";
 let actx = null;
 
 function getCtx() { if (!actx) actx = new (window.AudioContext||window.webkitAudioContext)(); return actx; }
+
+function stopPreview() {
+  if (curAudio) { try { curAudio.stop(); } catch(e){} curAudio = null; }
+  if (playTimer) { clearInterval(playTimer); playTimer = null; }
+}
 
 document.querySelectorAll(".fmt-btn").forEach(btn => {
   btn.onclick = () => {
@@ -210,7 +216,7 @@ async function embedText(text) {
   if (!API_KEY) { alert("请先填阿里云API Key"); throw new Error("no key"); }
   const r = await fetch("https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings", {
     method: "POST",
-    headers: { "Authorization": `Bearer ${API_KEY}`, "Content-Type": "application/json" },
+    headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
     body: JSON.stringify({ model: "text-embedding-v3", input: [text], dimensions: 1024, encoding_format: "float" })
   });
   const j = await r.json();
@@ -305,14 +311,14 @@ function renderSegList() {
     const d = document.createElement("div");
     d.className = "seg" + (i===STATE.cur?" active":"");
     d.innerHTML = `<b>${s.id}</b> <span class="mood">${s.mood}</span><br><span style="color:#666;font-size:11px;">${s.candidates[s.track]?.fn?.slice(0,35)||"无"}</span>`;
-    d.onclick = () => { STATE.cur = i; renderSegList(); renderDetail(); };
+    d.onclick = () => { STATE.cur = i; stopPreview(); renderSegList(); renderDetail(); };
     el.appendChild(d);
   });
 }
 
 async function renderDetail() {
   const s = STATE.segments[STATE.cur]; if (!s) return;
-  if (curAudio) { try{curAudio.stop();}catch(e){} curAudio = null; }
+  stopPreview();
   const el = document.getElementById("detail");
   if (!s.candidates[s.track]) { el.innerHTML = "<div style='color:#999;font-size:12px;'>该段无候选曲</div>"; return; }
   const cur = s.candidates[s.track];
@@ -335,10 +341,11 @@ async function renderDetail() {
     const d = document.createElement("div");
     d.className = "song" + (i===s.track?" sel":"");
     d.textContent = `[${i}] ${c.fn.slice(0,40)} (${c.sim.toFixed(2)})`;
-    d.onclick = () => { s.track = i; renderDetail(); };
+    d.onclick = () => { s.track = i; stopPreview(); renderDetail(); };
     cands.appendChild(d);
   });
   document.getElementById("previewBtn").onclick = async () => {
+    stopPreview();
     s.srcStart = parseFloat(document.getElementById("st").value);
     s.srcDur = parseFloat(document.getElementById("dur").value);
     const fh = SONG_MAP[cur.fn.toLowerCase()];
@@ -356,15 +363,15 @@ async function renderDetail() {
       const bar = document.getElementById("seekBar");
       document.getElementById("durTime").textContent = fmt(dur);
       const t0 = ctx.currentTime;
-      const timer = setInterval(() => {
+      playTimer = setInterval(() => {
         const t = ctx.currentTime - t0;
         bar.value = Math.min(100, (t/dur)*100);
         document.getElementById("curTime").textContent = fmt(t);
-        if (t >= dur) { clearInterval(timer); curAudio = null; }
+        if (t >= dur) { stopPreview(); }
       }, 100);
     } catch(e) { alert("解码失败："+e.message); }
   };
-  document.getElementById("pauseBtn").onclick = () => { if (curAudio) { try{curAudio.stop();}catch(e){} curAudio = null; } };
+  document.getElementById("pauseBtn").onclick = () => stopPreview();
 }
 
 function sliceBuffer(buf, off, dur) {
@@ -412,7 +419,6 @@ function crossfadeConcat(bufs, overlap=2.0) {
   return result;
 }
 
-// 凑够一段需要的时长：第一首不够就接同段下一首候选
 async function buildSegmentBuffer(seg, neededDur) {
   const pieces = [];
   let filled = 0;
@@ -425,7 +431,6 @@ async function buildSegmentBuffer(seg, neededDur) {
     try {
       const full = await decodeAudioFile(fh);
       const remain = neededDur - filled;
-      // 从该曲开头偏后一点截，截最多 remain+1 秒（给crossfade留余量）
       const piece = sliceBuffer(full, 2, remain + 1.5);
       pieces.push(piece);
       filled += piece.duration;
@@ -494,6 +499,7 @@ function applyFade(buf, fadeIn, fadeOut) {
 
 document.getElementById("exportAllBtn").onclick = async () => {
   if (!STATE.segments.length) { alert("请先分析"); return; }
+  stopPreview();
   const bar = document.getElementById("pbar");
   const st = document.getElementById("status");
   const bufs = [];
