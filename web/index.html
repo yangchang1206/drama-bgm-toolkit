@@ -5,7 +5,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>BGM工作台 v2.1</title>
+<title>BGM工作台 v2.2</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
 <style>
@@ -54,7 +54,7 @@ input[type=range] { width: 100%; margin-top: 6px; }
 .query-box { background:#f0f9ff; border-left:3px solid #0284c7; padding:6px 8px; margin-top:6px; font-size:11px; color:#075985; word-break: break-all; }
 .fmt-row { display:flex; gap:8px; align-items:center; margin-top:10px; }
 .fmt-row label { font-size:12px; color:#666; white-space:nowrap; }
-.fmt-btns { display:flex; gap:6px; flex:1; }
+.fmt-btns { display:flex; gap:8px; flex:1; }
 .fmt-btn { flex:1; padding:8px; border:2px solid #ddd; background:#f9fafb; color:#666; border-radius:6px; cursor:pointer; font-size:13px; margin-top:0; }
 .fmt-btn.on { border-color:#4f46e5; background:#eef2ff; color:#4338ca; font-weight:bold; }
 .tp-row { margin-top:8px; font-size:12px; color:#666; }
@@ -71,7 +71,7 @@ input[type=range] { width: 100%; margin-top: 6px; }
 </head>
 <body>
 <h1>🎬 BGM 工作台</h1>
-<div class="ver">版本 v2.1 · 如看到此行号说明已是新版</div>
+<div class="ver">版本 v2.2 · CORS代理修复</div>
 <div class="sub">纯前端 · 选音乐库 → 上传视频+剧本 → AI看图分析情绪 → 自动合并相似段 → 导出</div>
 
 <div id="globalErr"></div>
@@ -168,6 +168,30 @@ let curPreviewSource = null, curPreviewGain = null, playTimer = null, previewTok
 const CROSSFADE_SEC = 4.0, FADE_IN = 2.0, FADE_OUT = 3.0;
 const MERGE_SIM_THRESHOLD = 0.72, MAX_MUSIC_SEGMENTS = 4;
 
+// CORS代理：浏览器直接请求dashscope会被跨域拦截，通过代理中转
+const CORS_PROXIES = [
+  "https://corsproxy.io/?url=",
+  "https://api.allorigins.win/raw?url=",
+  ""
+];
+let proxyIdx = 0;
+
+async function apiFetch(url, options) {
+  let lastErr = null;
+  for (let i = 0; i < CORS_PROXIES.length; i++) {
+    const proxy = CORS_PROXIES[i];
+    const fullUrl = proxy ? proxy + encodeURIComponent(url) : url;
+    try {
+      const r = await fetch(fullUrl, options);
+      return r;
+    } catch(e) {
+      lastErr = e;
+      console.warn("proxy", i, "failed:", e.message);
+    }
+  }
+  throw lastErr || new Error("API请求失败");
+}
+
 function getCtx() { if (!actx) actx = new (window.AudioContext||window.webkitAudioContext)(); return actx; }
 function yieldUI() { return new Promise(r=>setTimeout(r,0)); }
 function esc(s) { return String(s==null?"":s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
@@ -207,7 +231,7 @@ document.getElementById("testKeyBtn").onclick = async () => {
   if (!key) { msg.textContent = "⚠️ 请先填Key"; msg.className = "api-msg err"; return; }
   msg.textContent = "⏳ 测试中..."; msg.className = "api-msg";
   try {
-    const r = await fetch("https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings", {
+    const r = await apiFetch("https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings", {
       method: "POST",
       headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
       body: JSON.stringify({ model: "text-embedding-v3", input: ["test"], dimensions: 1024, encoding_format: "float" })
@@ -282,7 +306,7 @@ async function loadEmb() {
       rb.textContent = `⚠️ 镜像${mi+1}失败（${e.message}），尝试下一个...`;
     }
   }
-  rb.innerHTML = `❌ <b>所有镜像都加载失败</b>。请检查网络后按 Ctrl+F5 刷新。<br>如果一直卡住，说明GitHub在国内被墙，需要开代理。`;
+  rb.innerHTML = `❌ <b>所有镜像都加载失败</b>。请检查网络后按 Ctrl+F5 刷新。`;
   rb.style.background = "#fee2e2"; rb.style.color = "#991b1b";
 }
 loadEmb();
@@ -352,8 +376,8 @@ document.getElementById("pickOutBtn").onclick = async () => {
 };
 
 async function embedText(text) {
-  if (!API_KEY) throw new Error("no key");
-  const r = await fetch("https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings", {
+  if (!API_KEY) throw new Error("请先填阿里云API Key");
+  const r = await apiFetch("https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings", {
     method: "POST",
     headers: { "Authorization": `Bearer ${API_KEY}`, "Content-Type": "application/json" },
     body: JSON.stringify({ model: "text-embedding-v3", input: [text], dimensions: 1024, encoding_format: "float" })
@@ -412,9 +436,9 @@ async function grabFrame(videoEl, timeSec) {
 }
 
 async function aiMoodQuery(dataUrl, scriptText) {
-  if (!API_KEY) throw new Error("no key");
+  if (!API_KEY) throw new Error("请先填阿里云API Key");
   const prompt = `这是短剧某一BGM段的中间画面截图。\n剧本片段：\n${scriptText.slice(0, 800)}\n\n任务：根据画面里主角的表情、动作、氛围，用15-25个英文单词描述这段应该配什么BGM情绪和风格。要求：\n1. 贴主角内心情绪（tense/relieved/determined/warm/angry/sad/vulnerable/triumphant/suspenseful等）\n2. 纯器乐，无人声（instrumental, no vocals）\n3. 只输出英文query一行`;
-  const r = await fetch("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", {
+  const r = await apiFetch("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", {
     method: "POST",
     headers: { "Authorization": `Bearer ${API_KEY}`, "Content-Type": "application/json" },
     body: JSON.stringify({
