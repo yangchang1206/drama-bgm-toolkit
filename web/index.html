@@ -56,12 +56,13 @@ input[type=range] { width: 100%; margin-top: 6px; }
 .detect-box { margin-top:6px; padding:8px; background:#f5f3ff; border-radius:6px; font-size:12px; }
 .merge-info { font-size:11px; color:#6b21a8; margin-top:4px; }
 .ai-tag { display:inline-block; background:#dcfce7; color:#15803d; padding:1px 6px; border-radius:3px; font-size:10px; margin-left:4px; }
+.merge-tag { display:inline-block; background:#fce7f3; color:#be185d; padding:1px 6px; border-radius:3px; font-size:10px; margin-left:4px; }
 @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
 <h1>🎬 BGM 工作台</h1>
-<div class="sub">纯前端 · 选音乐库 → 上传视频+剧本 → AI看图分析情绪 → 自动选曲 → 导出</div>
+<div class="sub">纯前端 · 选音乐库 → 上传视频+剧本 → AI看图分析情绪 → 自动合并相似段 → 导出</div>
 
 <div class="api-box">
   <label>🔑 阿里云API Key:</label>
@@ -97,14 +98,14 @@ input[type=range] { width: 100%; margin-top: 6px; }
     <div id="videoInfo" class="video-info">未选视频</div>
     <div class="detect-box">
       <button id="detectBtn" class="purple" disabled>🎬 自动检测镜头切换点</button>
-      <div style="font-size:11px;color:#6b21a8;margin-top:4px;">本地抽帧+帧差分析，视频不上传。自动合并短段，目标5-15段BGM。</div>
+      <div style="font-size:11px;color:#6b21a8;margin-top:4px;">本地抽帧+帧差，自动合并短段。BGM段再经情绪相似度二次合并，目标2-4段。</div>
       <div id="mergeInfo" class="merge-info"></div>
     </div>
     <div class="tp-row">
       <label>🎯 BGM分段时间点（自动检测后可手改）:</label>
-      <input type="text" id="timepoints" placeholder="示例: 0-22.5, 22.5-108（BGM切换点，不是每个镜头都切）">
+      <input type="text" id="timepoints" placeholder="示例: 0-22.5, 22.5-108">
     </div>
-    <button id="analyzeBtn" disabled>🔍 AI看图分析情绪 + 自动选曲</button>
+    <button id="analyzeBtn" disabled>🔍 AI看图分析情绪 + 自动合并选曲</button>
     <div class="fmt-row">
       <label>导出格式:</label>
       <div class="fmt-btns">
@@ -117,7 +118,7 @@ input[type=range] { width: 100%; margin-top: 6px; }
     <div id="status" class="status"></div>
   </div>
   <div class="col">
-    <h3>③ 情绪弧线</h3>
+    <h3>③ 情绪弧线（合并后）</h3>
     <div id="segList"><div style="color:#aaa;font-size:12px;">分析后显示分段</div></div>
   </div>
   <div class="col">
@@ -137,6 +138,13 @@ let EXPORT_FMT = "mp3";
 let actx = null;
 let VIDEO_DUR = 0;
 let analyzeVideoEl = null;
+
+// 关键参数
+const CROSSFADE_SEC = 4.0;    // 段间crossfade 4秒（之前2秒太突兀）
+const FADE_IN = 2.0;
+const FADE_OUT = 3.0;
+const MERGE_SIM_THRESHOLD = 0.72; // 相邻段query相似度>此值则合并
+const MAX_MUSIC_SEGMENTS = 4;    // 最多换4次歌
 
 function getCtx() { if (!actx) actx = new (window.AudioContext||window.webkitAudioContext)(); return actx; }
 function yieldUI() { return new Promise(r=>setTimeout(r,0)); }
@@ -257,11 +265,10 @@ async function decodeAudioFile(fileHandle) {
 }
 
 function analyzeMood(text) {
-  const t = text;
-  const hasAction = /(滑降|悬崖|绝壁|绳索|阵风|搏斗|打|杀|爆|冲|摔|撕|逼|威胁|刀|血|追|逃|枪|棍|拳|踢)/.test(t);
-  const hasDanger = /(危险|恐|怕|抖|惊|吓|死|丧|危机|陷|困|伤|痛|泪|哭|委屈|心酸|心碎|难|怒|吼|咆哮)/.test(t);
-  const hasWarm = /(抱|亲|笑|开心|幸福|团圆|家|温馨|感动|眼眶通红|敬慕|父子|父女|妈妈|爸爸|回家)/.test(t);
-  const hasTriumph = /(赢|胜|成功|奇迹|极品|至宝|拿下|庆祝|自信|阔步|金色|返程)/.test(t);
+  const hasAction = /(滑降|悬崖|绝壁|绳索|阵风|搏斗|打|杀|爆|冲|摔|撕|逼|威胁|刀|血|追|逃|枪|棍|拳|踢)/.test(text);
+  const hasDanger = /(危险|恐|怕|抖|惊|吓|死|丧|危机|陷|困|伤|痛|泪|哭|委屈|心酸|心碎|难|怒|吼|咆哮)/.test(text);
+  const hasWarm = /(抱|亲|笑|开心|幸福|团圆|家|温馨|感动|眼眶通红|敬慕|父子|父女|妈妈|爸爸|回家)/.test(text);
+  const hasTriumph = /(赢|胜|成功|奇迹|极品|至宝|拿下|庆祝|自信|阔步|金色|返程)/.test(text);
   let mood = "日常", query = "";
   if (hasAction && hasDanger) { mood = "紧张动作"; query = "tense action adventure cliff danger suspense epic drums thriller cinematic instrumental"; }
   else if (hasAction) { mood = "冒险史诗"; query = "adventure epic mountain exploration brave determined orchestral uplifting instrumental"; }
@@ -294,19 +301,16 @@ async function grabFrame(videoEl, timeSec) {
 
 async function aiMoodQuery(dataUrl, scriptText) {
   if (!API_KEY) throw new Error("no key");
-  const prompt = `这是短剧某一BGM段的中间画面截图。\n剧本片段：\n${scriptText.slice(0, 800)}\n\n任务：根据画面里主角的表情、动作、氛围，用15-25个英文单词描述这段应该配什么BGM情绪和风格，用于音乐检索。要求：\n1. 贴主角内心情绪（tense/relieved/determined/warm/angry/sad/vulnerable/triumphant/suspenseful等），不要只贴场景标签\n2. 纯器乐，无人声（instrumental, no vocals）\n3. 只输出英文query一行，不要解释，不要引号`;
+  const prompt = `这是短剧某一BGM段的中间画面截图。\n剧本片段：\n${scriptText.slice(0, 800)}\n\n任务：根据画面里主角的表情、动作、氛围，用15-25个英文单词描述这段应该配什么BGM情绪和风格，用于音乐检索。要求：\n1. 贴主角内心情绪（tense/relieved/determined/warm/angry/sad/vulnerable/triumphant/suspenseful等）\n2. 纯器乐，无人声（instrumental, no vocals）\n3. 只输出英文query一行，不要解释`;
   const r = await fetch("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", {
     method: "POST",
     headers: { "Authorization": `Bearer ${API_KEY}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "qwen-vl-plus",
-      messages: [{
-        role: "user",
-        content: [
-          { type: "image_url", image_url: { url: dataUrl } },
-          { type: "text", text: prompt }
-        ]
-      }],
+      messages: [{ role: "user", content: [
+        { type: "image_url", image_url: { url: dataUrl } },
+        { type: "text", text: prompt }
+      ]}],
       max_tokens: 120,
       temperature: 0.3
     })
@@ -356,13 +360,10 @@ document.getElementById("video").onchange = async (e) => {
 async function detectScenes(file, onProgress) {
   return new Promise((resolve) => {
     const video = document.createElement("video");
-    video.preload = "auto";
-    video.muted = true;
-    video.playsInline = true;
+    video.preload = "auto"; video.muted = true; video.playsInline = true;
     video.src = URL.createObjectURL(file);
     const W = 160, H = 90;
-    const canvas = document.createElement("canvas");
-    canvas.width = W; canvas.height = H;
+    const canvas = document.createElement("canvas"); canvas.width = W; canvas.height = H;
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     const STEP = 0.6, THRESHOLD = 38, MIN_GAP = 3.0;
     video.onloadedmetadata = async () => {
@@ -384,8 +385,7 @@ async function detectScenes(file, onProgress) {
                 const dr = d[j] - prevData[j], dg = d[j+1] - prevData[j+1], db = d[j+2] - prevData[j+2];
                 sum += dr*dr + dg*dg + db*db;
               }
-              const mse = sum / (n * 3);
-              if (mse > THRESHOLD) {
+              if (sum/(n*3) > THRESHOLD) {
                 const lastCut = cuts[cuts.length-1];
                 if (t - lastCut > MIN_GAP) cuts.push(t);
               }
@@ -407,11 +407,8 @@ function mergeShortSegments(cuts, totalDur) {
   const MIN_SEG = 4.0, MAX_SEGS = 15;
   while (pts.length > 2) {
     let shortestIdx = 1, shortestLen = Infinity;
-    for (let i=1;i<pts.length;i++) {
-      const len = pts[i] - pts[i-1];
-      if (len < shortestLen) { shortestLen = len; shortestIdx = i; }
-    }
-    if (shortestLen >= MIN_SEG && pts.length - 1 <= MAX_SEGS) break;
+    for (let i=1;i<pts.length;i++) { const len = pts[i]-pts[i-1]; if (len<shortestLen) { shortestLen=len; shortestIdx=i; } }
+    if (shortestLen >= MIN_SEG && pts.length-1 <= MAX_SEGS) break;
     pts.splice(shortestIdx, 1);
   }
   return pts;
@@ -424,17 +421,15 @@ document.getElementById("detectBtn").onclick = async () => {
   btn.disabled = true; btn.textContent = "🎬 检测中...";
   const bar = document.getElementById("pbar");
   try {
-    const rawCuts = await detectScenes(vf, (p, t) => {
-      setProgress(bar, Math.round(p*90), `抽帧分析 ${t.toFixed(1)}s`);
-    });
+    const rawCuts = await detectScenes(vf, (p,t) => setProgress(bar, Math.round(p*90), `抽帧分析 ${t.toFixed(1)}s`));
     setProgress(bar, 95, "合并短段...");
     await yieldUI();
     const merged = mergeShortSegments(rawCuts, VIDEO_DUR);
     const segs = [];
     for (let i=0;i<merged.length-1;i++) segs.push(`${merged[i].toFixed(1)}-${merged[i+1].toFixed(1)}`);
     document.getElementById("timepoints").value = segs.join(", ");
-    document.getElementById("mergeInfo").textContent = `原始${rawCuts.length-1}段 → 合并后${merged.length-1}段（单段≥4秒，最多15段）`;
-    document.getElementById("status").textContent = `✅ 检测到 ${merged.length-1} 个BGM段，已自动填入。可手改后点【AI看图分析情绪+选曲】`;
+    document.getElementById("mergeInfo").textContent = `原始${rawCuts.length-1}段 → 镜头合并后${merged.length-1}段（还会经情绪相似度二次合并）`;
+    document.getElementById("status").textContent = `✅ 检测到 ${merged.length-1} 个镜头段，已填入。点【AI看图分析情绪+选曲】后会自动合并相似情绪段。`;
     btn.textContent = "🎬 重新检测";
     btn.disabled = false;
     setProgress(bar, 100, "完成");
@@ -449,7 +444,7 @@ document.getElementById("analyzeBtn").onclick = async () => {
   const script = document.getElementById("script").value;
   const vf = document.getElementById("video").files[0];
   if (!script || !vf) { alert("请填剧本+选视频"); return; }
-  if (!API_KEY) { alert("请先填阿里云API Key（需要qwen-vl-plus看图+embedding搜曲）"); return; }
+  if (!API_KEY) { alert("请先填阿里云API Key"); return; }
   const st = document.getElementById("status");
   const bar = document.getElementById("pbar");
   setProgress(bar, 3, "准备视频...");
@@ -457,8 +452,7 @@ document.getElementById("analyzeBtn").onclick = async () => {
   if (!analyzeVideoEl || !analyzeVideoEl.videoWidth) {
     if (analyzeVideoEl) analyzeVideoEl.remove();
     analyzeVideoEl = document.createElement("video");
-    analyzeVideoEl.muted = true;
-    analyzeVideoEl.playsInline = true;
+    analyzeVideoEl.muted = true; analyzeVideoEl.playsInline = true;
     analyzeVideoEl.style.display = "none";
     document.body.appendChild(analyzeVideoEl);
     analyzeVideoEl.src = URL.createObjectURL(vf);
@@ -477,58 +471,100 @@ document.getElementById("analyzeBtn").onclick = async () => {
   let segDefs = [];
   if (timeSegs && timeSegs.length) {
     for (let i=0;i<timeSegs.length;i++) {
-      const s = timeSegs[i].start, e = timeSegs[i].end;
-      const ratio = scenes.length ? i / Math.max(1, timeSegs.length - 1) : 0;
-      const scIdx = Math.min(scenes.length - 1, Math.floor(ratio * scenes.length));
-      const sc = scenes[Math.max(0, scIdx)] || {id: `seg${i+1}`, text: script};
-      segDefs.push({ id: sc.id, start: s, end: e, text: sc.text });
+      const s = timeSegs[i];
+      const ratio = scenes.length ? i / Math.max(1, timeSegs.length-1) : 0;
+      const scIdx = Math.min(scenes.length-1, Math.floor(ratio*scenes.length));
+      const sc = scenes[Math.max(0,scIdx)] || {id:`seg${i+1}`, text:script};
+      segDefs.push({ id: sc.id, start: s.start, end: s.end, text: sc.text });
     }
   } else {
     const n = scenes.length || 1;
-    const segLen = dur / n;
-    for (let i=0;i<n;i++) {
-      segDefs.push({ id: scenes[i].id, start: i*segLen, end: (i+1)*segLen, text: scenes[i].text });
-    }
+    const segLen = dur/n;
+    for (let i=0;i<n;i++) segDefs.push({id:scenes[i].id, start:i*segLen, end:(i+1)*segLen, text:scenes[i].text});
   }
 
+  // Step 1: 每段抽帧+AI看图拿query+embedding
   const n = segDefs.length;
-  STATE.segments = [];
-  STATE.cur = 0;
+  const rawSegs = [];
   const usedSongs = new Set();
-
-  for (let i=0;i<segDefs.length;i++) {
+  for (let i=0;i<n;i++) {
     const s = segDefs[i];
     const segDur = s.end - s.start;
-    const mid = (s.start + s.end) / 2;
-    let query, mood = "AI", fromAI = false;
-
+    const mid = (s.start+s.end)/2;
+    let query, fromAI = false;
     try {
-      setProgress(bar, 5 + Math.round((i/n)*50), `段${i+1}/${n} 抽帧+AI看图分析情绪 (${mid.toFixed(1)}s)`);
+      setProgress(bar, 5 + Math.round((i/n)*45), `段${i+1}/${n} AI看图 (${mid.toFixed(1)}s)`);
       await yieldUI();
       const frame = await grabFrame(analyzeVideoEl, mid);
       query = await aiMoodQuery(frame, s.text);
-      mood = "AI"; fromAI = true;
+      fromAI = true;
     } catch(e) {
-      console.warn("AI mood failed, fallback to rules:", e);
       const fb = analyzeMood(s.text);
-      query = fb.query; mood = fb.mood + "(规则)"; fromAI = false;
+      query = fb.query;
     }
+    const qVec = await embedText(query);
+    rawSegs.push({ id: s.id, start: s.start, end: s.end, text: s.text, query, qVec, fromAI, segDur });
+  }
 
-    setProgress(bar, 55 + Math.round((i/n)*35), `段${i+1}/${n} 搜曲中...`);
+  // Step 2: 情绪相似度二次合并——相邻段cosine>阈值就合并
+  setProgress(bar, 55, "情绪相似段合并...");
+  await yieldUI();
+  function cos(a,b){ let d=0,na=0,nb=0; for(let i=0;i<a.length;i++){ d+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; } return d/(Math.sqrt(na)*Math.sqrt(nb)||1); }
+
+  const mergedGroups = [];
+  let curGroup = [rawSegs[0]];
+  for (let i=1;i<rawSegs.length;i++) {
+    const sim = cos(curGroup[curGroup.length-1].qVec, rawSegs[i].qVec);
+    // 如果合并后总数<=MAX_MUSIC_SEGMENTS 且相似度够高，就合并
+    if (sim > MERGE_SIM_THRESHOLD && (mergedGroups.length + curGroup.length) <= MAX_MUSIC_SEGMENTS) {
+      curGroup.push(rawSegs[i]);
+    } else {
+      mergedGroups.push(curGroup);
+      curGroup = [rawSegs[i]];
+    }
+  }
+  mergedGroups.push(curGroup);
+
+  // Step 3: 每个合并后的组用平均query搜曲
+  STATE.segments = [];
+  for (let g=0; g<mergedGroups.length; g++) {
+    const grp = mergedGroups[g];
+    const gStart = grp[0].start;
+    const gEnd = grp[grp.length-1].end;
+    const gDur = gEnd - gStart;
+    // 平均query向量
+    const avgVec = new Float32Array(rawSegs[0].qVec.length);
+    for (const s of grp) for (let i=0;i<avgVec.length;i++) avgVec[i] += s.qVec[i];
+    for (let i=0;i<avgVec.length;i++) avgVec[i] /= grp.length;
+    // 拼接query文本
+    const gQuery = grp.map(s=>s.query).join(" / ");
+
+    setProgress(bar, 60 + Math.round((g/mergedGroups.length)*30), `选曲组${g+1}/${mergedGroups.length}（覆盖${gStart.toFixed(0)}-${gEnd.toFixed(0)}s）`);
     await yieldUI();
-    const q = await embedText(query);
-    const qn = norm(q);
+
+    const qn = norm(Array.from(avgVec));
     let scores = EMB.filter(e => e.voc !== "yes" && SONG_MAP[e.fn.toLowerCase()] && !usedSongs.has(e.fn))
       .map(e => { const en = norm(decodeVec(e.v)); let sc=0; for(let j=0;j<qn.length;j++) sc+=qn[j]*en[j]; return {sim:sc, fn:e.fn}; });
     scores.sort((a,b)=>b.sim-a.sim);
     const top = scores.slice(0,10);
     if (top.length) usedSongs.add(top[0].fn);
-    STATE.segments.push({ id: s.id+"#"+(i+1), timeStart: s.start, timeEnd: s.end, mood, query, fromAI, candidates: top, track: 0, srcStart: 2, srcDur: segDur+1.5 });
+
+    STATE.segments.push({
+      id: grp[0].id + (grp.length>1?`+${grp.length-1}`:""),
+      timeStart: gStart, timeEnd: gEnd,
+      mood: grp[0].fromAI ? "AI" : "规则",
+      query: gQuery,
+      fromAI: grp[0].fromAI,
+      mergedCount: grp.length,
+      candidates: top, track: 0,
+      srcStart: 2, srcDur: gDur + 2.0
+    });
   }
-  setProgress(bar, 95, "渲染结果...");
+
+  setProgress(bar, 95, "渲染...");
   renderSegList();
   renderDetail();
-  st.textContent = `✅ 完成！共${n}段（AI看图${STATE.segments.filter(s=>s.fromAI).length}/${n}），视频${dur.toFixed(1)}秒。点③段可试听换曲。`;
+  st.textContent = `✅ 完成！镜头${n}段 → 情绪合并后${STATE.segments.length}段BGM（换歌${STATE.segments.length-1}次，crossfade ${CROSSFADE_SEC}s）。视频${dur.toFixed(1)}秒。`;
   document.getElementById("exportAllBtn").disabled = false;
 };
 
@@ -538,7 +574,7 @@ function parseScenes(text) {
   const re = /(\d{1,3}-\d{1,3})/;
   for (const line of lines) {
     const m = line.match(re);
-    if (m) { if (cur) scenes.push(cur); cur = {id: m[1], text: line}; }
+    if (m) { if (cur) scenes.push(cur); cur = {id:m[1], text:line}; }
     else if (cur) cur.text += "\n"+line;
   }
   if (cur) scenes.push(cur); return scenes;
@@ -548,8 +584,10 @@ function renderSegList() {
   STATE.segments.forEach((s,i) => {
     const d = document.createElement("div");
     d.className = "seg" + (i===STATE.cur?" active":"");
-    const aiTag = s.fromAI ? '<span class="ai-tag">AI</span>' : '';
-    d.innerHTML = `<b>${s.id}</b> <span class="mood">${s.mood}</span>${aiTag}<br><span style="color:#666;font-size:11px;">${s.timeStart.toFixed(0)}-${s.timeEnd.toFixed(0)}s · ${s.candidates[s.track]?.fn?.slice(0,28)||"无"}</span>`;
+    const tags = [];
+    if (s.fromAI) tags.push('<span class="ai-tag">AI</span>');
+    if (s.mergedCount > 1) tags.push(`<span class="merge-tag">合并${s.mergedCount}镜头</span>`);
+    d.innerHTML = `<b>${s.id}</b> <span class="mood">${s.mood}</span> ${tags.join("")}<br><span style="color:#666;font-size:11px;">${s.timeStart.toFixed(0)}-${s.timeEnd.toFixed(0)}s · ${s.candidates[s.track]?.fn?.slice(0,28)||"无"}</span>`;
     d.onclick = () => { STATE.cur = i; stopPreview(); renderSegList(); renderDetail(); };
     el.appendChild(d);
   });
@@ -561,10 +599,12 @@ async function renderDetail() {
   const el = document.getElementById("detail");
   if (!s.candidates[s.track]) { el.innerHTML = "<div style='color:#999;font-size:12px;'>该段无候选曲</div>"; return; }
   const cur = s.candidates[s.track];
-  const aiTag = s.fromAI ? '<span class="ai-tag">AI看图生成</span>' : '<span style="font-size:10px;color:#999;">规则fallback</span>';
-  el.innerHTML = `<b>段 ${s.id}</b> <span class="mood">${s.mood}</span> ${aiTag}<br>
+  const tags = [];
+  if (s.fromAI) tags.push('<span class="ai-tag">AI看图生成</span>');
+  if (s.mergedCount > 1) tags.push(`<span class="merge-tag">合并了${s.mergedCount}个镜头段</span>`);
+  el.innerHTML = `<b>段 ${s.id}</b> <span class="mood">${s.mood}</span> ${tags.join("")}<br>
     <span style="color:#666;font-size:11px;">视频区间: ${s.timeStart.toFixed(1)}s - ${s.timeEnd.toFixed(1)}s（共${(s.timeEnd-s.timeStart).toFixed(1)}s）</span><br>
-    <div class="query-box">🔍 AI query: ${s.query}</div>
+    <div class="query-box">🔍 query: ${s.query}</div>
     <div class="song sel">${cur.fn} (相似度${cur.sim.toFixed(2)})</div>
     <div style="margin-top:8px;">
       <label style="font-size:12px;">素材起始: <input type="number" id="st" value="${s.srcStart.toFixed(1)}" step="0.5" style="width:70px;">秒</label>
@@ -595,8 +635,7 @@ async function renderDetail() {
       const buf = await decodeAudioFile(fh);
       const ctx = getCtx();
       const off = s.srcStart, dur = Math.min(s.srcDur, buf.duration - off);
-      const src = ctx.createBufferSource();
-      src.buffer = buf;
+      const src = ctx.createBufferSource(); src.buffer = buf;
       const gain = ctx.createGain();
       src.connect(gain).connect(ctx.destination);
       src.start(0, off, dur);
@@ -608,7 +647,7 @@ async function renderDetail() {
         const t = ctx.currentTime - t0;
         bar.value = Math.min(100, (t/dur)*100);
         document.getElementById("curTime").textContent = fmt(t);
-        if (t >= dur) { stopPreview(); }
+        if (t >= dur) stopPreview();
       }, 100);
     } catch(e) { alert("解码失败："+e.message); }
   };
@@ -618,19 +657,18 @@ async function renderDetail() {
 function sliceBuffer(buf, off, dur) {
   const ctx = getCtx();
   const offS = Math.max(0, off);
-  const avail = buf.duration - offS;
-  const take = Math.min(dur, avail);
+  const take = Math.min(dur, buf.duration - offS);
   const len = Math.max(0, Math.floor(take*buf.sampleRate));
   const out = ctx.createBuffer(buf.numberOfChannels, len, buf.sampleRate);
   for (let ch=0; ch<buf.numberOfChannels; ch++) {
-    const d = buf.getChannelData(ch);
-    const o = out.getChannelData(ch);
+    const d = buf.getChannelData(ch); const o = out.getChannelData(ch);
     for (let i=0;i<len;i++) o[i] = d[Math.floor(offS*buf.sampleRate)+i];
   }
   return out;
 }
 
-async function crossfadeConcatAsync(bufs, overlap=2.0) {
+async function crossfadeConcatAsync(bufs, overlap) {
+  overlap = overlap || CROSSFADE_SEC;
   if (bufs.length===0) return null;
   if (bufs.length===1) return bufs[0];
   const ctx = getCtx();
@@ -641,16 +679,14 @@ async function crossfadeConcatAsync(bufs, overlap=2.0) {
     const totalLen = Math.floor((result.duration + b.duration - ov) * result.sampleRate);
     const out = ctx.createBuffer(result.numberOfChannels, totalLen, result.sampleRate);
     for (let ch=0; ch<out.numberOfChannels; ch++) {
-      const rd = result.getChannelData(ch);
-      const od = b.getChannelData(ch);
-      const wd = out.getChannelData(ch);
+      const rd = result.getChannelData(ch); const od = b.getChannelData(ch); const wd = out.getChannelData(ch);
       for (let j=0;j<rd.length;j++) wd[j] = rd[j];
       const ovLen = Math.floor(ov*result.sampleRate);
       const ovStart = rd.length - ovLen;
       for (let j=0;j<ovLen;j++) {
-        const fadeOut = Math.cos((j/ovLen)*Math.PI/2);
-        const fadeIn = Math.sin((j/ovLen)*Math.PI/2);
-        wd[ovStart+j] = rd[ovStart+j]*fadeOut + od[j]*fadeIn;
+        const fo = Math.cos((j/ovLen)*Math.PI/2);
+        const fi = Math.sin((j/ovLen)*Math.PI/2);
+        wd[ovStart+j] = rd[ovStart+j]*fo + od[j]*fi;
       }
       const bStart = Math.floor(ov*b.sampleRate);
       for (let j=bStart;j<od.length;j++) wd[rd.length - ovLen + (j-bStart)] = od[j];
@@ -673,7 +709,7 @@ async function buildSegmentBuffer(seg, neededDur) {
     try {
       const full = await decodeAudioFile(fh);
       const remain = neededDur - filled;
-      const piece = sliceBuffer(full, 2, remain + 1.5);
+      const piece = sliceBuffer(full, seg.srcStart, remain + CROSSFADE_SEC);
       pieces.push(piece);
       filled += piece.duration;
       used.add(c.fn);
@@ -681,6 +717,7 @@ async function buildSegmentBuffer(seg, neededDur) {
     await yieldUI();
   }
   if (!pieces.length) return null;
+  if (pieces.length === 1) return pieces[0];
   return crossfadeConcatAsync(pieces, 1.5);
 }
 
@@ -694,14 +731,14 @@ function bufferToMp3(buf, kbps=192) {
   const samples = buf.length;
   const out = [];
   for (let i=0; i<samples; i+=blockSize) {
-    const leftChunk = new Int16Array(blockSize);
-    const rightChunk = numCh === 2 ? new Int16Array(blockSize) : null;
+    const lc = new Int16Array(blockSize);
+    const rc = numCh === 2 ? new Int16Array(blockSize) : null;
     for (let j=0;j<blockSize && i+j<samples;j++) {
       const l = Math.max(-1, Math.min(1, left[i+j]));
-      leftChunk[j] = l<0 ? l*0x8000 : l*0x7FFF;
-      if (rightChunk) { const r = Math.max(-1, Math.min(1, right[i+j])); rightChunk[j] = r<0 ? r*0x8000 : r*0x7FFF; }
+      lc[j] = l<0 ? l*0x8000 : l*0x7FFF;
+      if (rc) { const r = Math.max(-1, Math.min(1, right[i+j])); rc[j] = r<0 ? r*0x8000 : r*0x7FFF; }
     }
-    const mp3buf = numCh === 2 ? enc.encodeBuffer(leftChunk, rightChunk) : enc.encodeBuffer(leftChunk);
+    const mp3buf = numCh === 2 ? enc.encodeBuffer(lc, rc) : enc.encodeBuffer(lc);
     if (mp3buf.length > 0) out.push(new Uint8Array(mp3buf));
   }
   const end = enc.flush();
@@ -748,15 +785,15 @@ document.getElementById("exportAllBtn").onclick = async () => {
   const bufs = [];
   for (let i=0;i<STATE.segments.length;i++) {
     const s = STATE.segments[i];
-    setProgress(bar, Math.round((i/STATE.segments.length)*80), `构建段${i+1}/${STATE.segments.length}（不够自动接下一首）`);
+    setProgress(bar, Math.round((i/STATE.segments.length)*80), `构建BGM段${i+1}/${STATE.segments.length}（${s.timeStart.toFixed(0)}-${s.timeEnd.toFixed(0)}s）`);
     const segBuf = await buildSegmentBuffer(s, s.srcDur);
     if (segBuf) bufs.push(segBuf);
     await yieldUI();
   }
-  setProgress(bar, 88, "crossfade拼接...");
+  setProgress(bar, 88, `crossfade ${CROSSFADE_SEC}s 拼接...`);
   await yieldUI();
-  const mixed = await crossfadeConcatAsync(bufs, 2.0);
-  applyFade(mixed, 2.0, 2.0);
+  const mixed = await crossfadeConcatAsync(bufs, CROSSFADE_SEC);
+  applyFade(mixed, FADE_IN, FADE_OUT);
   let blob, ext, desc;
   if (EXPORT_FMT === "mp3") {
     setProgress(bar, 95, "编码MP3...");
@@ -770,11 +807,11 @@ document.getElementById("exportAllBtn").onclick = async () => {
     const w = await OUT_DIR.getFileHandle(fname, {create:true});
     const w2 = await w.createWritable();
     await w2.write(blob); await w2.close();
-    st.textContent = `✅ 已导出到 ${OUT_DIR.name}/${fname}（${mixed.duration.toFixed(1)}秒，目标视频${STATE.duration.toFixed(1)}秒）`;
+    st.textContent = `✅ 已导出到 ${OUT_DIR.name}/${fname}（${mixed.duration.toFixed(1)}秒，目标${STATE.duration.toFixed(1)}秒，${STATE.segments.length}段BGM）`;
   } else {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob); a.download = fname; a.click();
-    st.textContent = `✅ 已导出 ${fname}（${mixed.duration.toFixed(1)}秒，目标视频${STATE.duration.toFixed(1)}秒，${desc}）`;
+    st.textContent = `✅ 已导出 ${fname}（${mixed.duration.toFixed(1)}秒，目标${STATE.duration.toFixed(1)}秒，${STATE.segments.length}段BGM，${desc}）`;
   }
   setProgress(bar, 100, "完成");
 };
