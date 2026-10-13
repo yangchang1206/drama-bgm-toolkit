@@ -41,12 +41,13 @@ input[type=range] { width: 100%; margin-top: 6px; }
 .api-msg { font-size:12px; margin-left:8px; }
 .api-msg.ok { color:#059669; }
 .api-msg.err { color:#dc2626; }
+.export-btn { width:100%; padding:12px; font-size:15px; margin-top:12px; background:#059669; }
 @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
 <h1>🎬 BGM 工作台</h1>
-<div class="sub">纯前端 · 选音乐库 → 粘贴剧本 → 自动选曲 → 导出MP3</div>
+<div class="sub">纯前端 · 选音乐库 → 粘贴剧本 → 自动选曲 → 导出WAV</div>
 
 <div class="api-box">
   <label>🔑 阿里云API Key:</label>
@@ -80,6 +81,7 @@ input[type=range] { width: 100%; margin-top: 6px; }
     <textarea id="script" placeholder="粘贴整集剧本（含 41-1、41-2 等场号）"></textarea>
     <input type="file" id="video" accept="video/*" style="margin-top:8px;">
     <button id="analyzeBtn" disabled>🔍 分析并自动选曲</button>
+    <button id="exportAllBtn" class="export-btn green" disabled>💾 导出整集BGM (WAV)</button>
     <div class="pbar-wrap" id="pbarWrap"><div class="pbar" id="pbar" style="width:0%">0%</div></div>
     <div id="status" class="status"></div>
   </div>
@@ -89,7 +91,7 @@ input[type=range] { width: 100%; margin-top: 6px; }
   </div>
   <div class="col">
     <h3>④ 段详情 / 试听</h3>
-    <div id="detail"><div style="color:#aaa;font-size:12px;">点左侧某段查看</div></div>
+    <div id="detail"><div style="color:#aaa;font-size:12px;">点中间段查看</div></div>
   </div>
 </div>
 
@@ -99,19 +101,22 @@ let curAudio = null;
 let LIB_READY = false;
 let API_KEY = localStorage.getItem("dashscope_key") || "";
 let STATE = { segments: [], cur: 0, duration: 0 };
+let actx = null;
 
 const MOOD_MAP = {
-  "紧张/对峙": ["紧张 对峙 压迫 危险 黑暗 悬疑"],
-  "打斗/爆发": ["激烈 动作 打斗 高潮 节奏快 鼓点"],
-  "悲伤/委屈": ["悲伤 委屈 难过 钢琴 孤独 催泪"],
-  "温暖/治愈": ["温暖 治愈 家庭 亲情 弦乐 感人"],
-  "愤怒/反击": ["愤怒 反击 冲突 爆发 沉重"],
-  "冷静/霸气": ["冷静 霸气 坚定 王者 沉稳 史诗"],
-  "惊喜/发现": ["惊喜 发现 奇迹 升华 梦幻"],
-  "阴谋/悬疑": ["阴谋 悬疑 神秘 低沉 诡异 紧张"],
-  "回忆/怀旧": ["回忆 怀旧 怀念 钢琴 伤感 时光"],
-  "温馨/日常": ["温馨 日常 轻松 吉他 平和 乡村"],
+  "紧张/对峙": ["紧张 对峙 压迫 危险 黑暗 悬疑 thriller tension"],
+  "打斗/爆发": ["激烈 动作 打斗 高潮 节奏快 鼓点 action fight drums"],
+  "悲伤/委屈": ["悲伤 委屈 难过 钢琴 孤独 催泪 sad piano emotional"],
+  "温暖/治愈": ["温暖 治愈 家庭 亲情 弦乐 感人 warm healing family"],
+  "愤怒/反击": ["愤怒 反击 冲突 爆发 沉重 angry revenge dramatic"],
+  "冷静/霸气": ["冷静 霸气 坚定 王者 沉稳 史诗 powerful epic calm"],
+  "惊喜/发现": ["惊喜 发现 奇迹 升华 梦幻 wonder magical discovery"],
+  "阴谋/悬疑": ["阴谋 悬疑 神秘 低沉 诡异 紧张 mysterious conspiracy dark"],
+  "回忆/怀旧": ["回忆 怀旧 怀念 钢琴 伤感 时光 nostalgic memory piano"],
+  "温馨/日常": ["温馨 日常 轻松 吉他 平和 乡村 warm daily light acoustic"],
 };
+
+function getCtx() { if (!actx) actx = new (window.AudioContext||window.webkitAudioContext)(); return actx; }
 
 document.getElementById("apiKey").value = API_KEY;
 document.getElementById("saveKeyBtn").onclick = () => {
@@ -220,6 +225,14 @@ function decodeVec(b64) {
   return arr;
 }
 
+// 解码音频文件为 AudioBuffer
+async function decodeAudioFile(fileHandle) {
+  const file = await fileHandle.getFile();
+  const buf = await file.arrayBuffer();
+  const ctx = getCtx();
+  return await ctx.decodeAudioData(buf);
+}
+
 document.getElementById("analyzeBtn").onclick = async () => {
   if (!LIB_READY) { alert("请先点【分析音乐库】"); return; }
   const script = document.getElementById("script").value;
@@ -237,8 +250,14 @@ document.getElementById("analyzeBtn").onclick = async () => {
   STATE.segments = [];
   for (let i=0;i<scenes.length;i++) {
     const text = scenes[i].text;
-    let mood = "紧张/对峙";
-    for (const k of Object.keys(MOOD_MAP)) if (k.split("/").some(kw => text.includes(kw))) { mood = k; break; }
+    // 情绪判断
+    let mood = "温馨/日常";
+    if (/打|杀|爆|怒|吼|冲|摔|撕|逼|威胁/.test(text)) mood = "愤怒/反击";
+    if (/哭|泪|委屈|心酸|疼|心碎|难/.test(text)) mood = "悲伤/委屈";
+    if (/紧张|对峙|压|危险|恐|抖|惊/.test(text)) mood = "紧张/对峙";
+    if (/暖|笑|开心|幸福|团圆|亲|家|温馨/.test(text)) mood = "温暖/治愈";
+    if (/阴谋|神秘|诡异|暗|沉|黑/.test(text)) mood = "阴谋/悬疑";
+    if (/回忆|从前|当年|旧|怀念/.test(text)) mood = "回忆/怀旧";
     const query = MOOD_MAP[mood][0];
     const pct = 10 + Math.round((i/n)*85);
     setProgress(bar, pct, `场${scenes[i].id} 搜曲中 (${i+1}/${n})`);
@@ -250,11 +269,12 @@ document.getElementById("analyzeBtn").onclick = async () => {
       return {sim: s, fn: e.fn};
     });
     scores.sort((a,b)=>b.sim-a.sim);
-    STATE.segments.push({ id: scenes[i].id, timeStart: i*segLen, timeEnd: (i+1)*segLen, mood, candidates: scores.slice(0,10), track: 0, start: 0, end: segLen+2 });
+    STATE.segments.push({ id: scenes[i].id, timeStart: i*segLen, timeEnd: (i+1)*segLen, mood, candidates: scores.slice(0,10), track: 0, srcStart: 2, srcDur: segLen+2 });
   }
   setProgress(bar, 100, "完成");
   renderSegList();
-  st.textContent = "✅ 完成！点中间段查看详情";
+  st.textContent = `✅ 完成！共${n}段，视频${dur.toFixed(1)}秒。点中间段查看，最后点导出整集BGM。`;
+  document.getElementById("exportAllBtn").disabled = false;
 };
 
 function norm(a) { let s=0; for (const x of a) s+=x*x; s=Math.sqrt(s)||1; return a.map(x=>x/s); }
@@ -290,13 +310,12 @@ async function renderDetail() {
   el.innerHTML = `<b>段 ${s.id}</b> <span class="mood">${s.mood}</span><br>
     <div class="song sel">${cur.fn} (相似度${cur.sim.toFixed(2)})</div>
     <div style="margin-top:8px;">
-      <label style="font-size:12px;">开始: <input type="number" id="st" value="${s.start.toFixed(1)}" step="0.5" style="width:70px;"></label>
-      <label style="font-size:12px;">结束: <input type="number" id="en" value="${s.end.toFixed(1)}" step="0.5" style="width:70px;"></label>
+      <label style="font-size:12px;">素材起始: <input type="number" id="st" value="${s.srcStart.toFixed(1)}" step="0.5" style="width:70px;">秒</label>
+      <label style="font-size:12px;">素材时长: <input type="number" id="dur" value="${s.srcDur.toFixed(1)}" step="0.5" style="width:70px;">秒</label>
     </div>
     <div id="cands" style="margin-top:8px;"></div>
     <button id="previewBtn">▶ 播放</button>
     <button id="pauseBtn" class="secondary">⏸ 暂停</button>
-    <button id="exportBtn" class="green">💾 导出此段MP3</button>
     <div class="player">
       <input type="range" id="seekBar" min="0" max="100" value="0">
       <div class="time"><span id="curTime">0:00</span><span id="durTime">0:00</span></div>
@@ -310,44 +329,166 @@ async function renderDetail() {
     cands.appendChild(d);
   });
   document.getElementById("previewBtn").onclick = async () => {
-    s.start = parseFloat(document.getElementById("st").value);
-    s.end = parseFloat(document.getElementById("en").value);
+    s.srcStart = parseFloat(document.getElementById("st").value);
+    s.srcDur = parseFloat(document.getElementById("dur").value);
     const fh = SONG_MAP[cur.fn.toLowerCase()];
     if (!fh) { alert("找不到文件："+cur.fn); return; }
     if (curAudio) curAudio.pause();
-    const file = await fh.getFile();
-    curAudio = new Audio(URL.createObjectURL(file));
-    curAudio.currentTime = s.start;
-    curAudio.play();
-    const bar = document.getElementById("seekBar");
-    curAudio.ontimeupdate = () => {
-      const pct = ((curAudio.currentTime - s.start) / (s.end - s.start)) * 100;
-      bar.value = Math.max(0, Math.min(100, pct));
-      document.getElementById("curTime").textContent = fmt(curAudio.currentTime - s.start);
-      if (curAudio.currentTime >= s.end) curAudio.pause();
-    };
-    curAudio.onloadedmetadata = () => { document.getElementById("durTime").textContent = fmt(s.end - s.start); };
-    bar.oninput = () => { curAudio.currentTime = s.start + (bar.value/100)*(s.end-s.start); };
+    try {
+      const buf = await decodeAudioFile(fh);
+      const ctx = getCtx();
+      const off = s.srcStart, dur = Math.min(s.srcDur, buf.duration - off);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      const gain = ctx.createGain();
+      src.connect(gain).connect(ctx.destination);
+      src.start(0, off, dur);
+      curAudio = src;
+      const bar = document.getElementById("seekBar");
+      document.getElementById("durTime").textContent = fmt(dur);
+      const t0 = ctx.currentTime;
+      const timer = setInterval(() => {
+        const t = ctx.currentTime - t0;
+        bar.value = (t/dur)*100;
+        document.getElementById("curTime").textContent = fmt(t);
+        if (t >= dur) { clearInterval(timer); curAudio = null; }
+      }, 100);
+    } catch(e) { alert("解码失败："+e.message); }
   };
-  document.getElementById("pauseBtn").onclick = () => { if (!curAudio) return; if (curAudio.paused) curAudio.play(); else curAudio.pause(); };
-  document.getElementById("exportBtn").onclick = async () => {
-    const fh = SONG_MAP[cur.fn.toLowerCase()];
-    if (!fh) { alert("找不到文件"); return; }
-    const file = await fh.getFile();
-    if (OUT_DIR) {
-      const w = await OUT_DIR.getFileHandle(`${s.id}_${cur.fn}`, {create:true});
-      const w2 = await w.createWritable();
-      await w2.write(await file.slice(s.start, s.end).arrayBuffer());
-      await w2.close();
-      alert("已导出到：" + OUT_DIR.name);
-    } else {
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(await file.slice(s.start, s.end).arrayBuffer());
-      a.download = `${s.id}_${cur.fn}`;
-      a.click();
-    }
-  };
+  document.getElementById("pauseBtn").onclick = () => { if (!curAudio) return; try { curAudio.stop(); curAudio = null; } catch(e){} };
 }
+
+// 把一段 AudioBuffer 按 off/dur 裁剪到新 buffer
+function sliceBuffer(buf, off, dur) {
+  const ctx = getCtx();
+  const offS = Math.max(0, off), endS = Math.min(buf.duration, off+dur);
+  const len = Math.max(0, Math.floor((endS-offS)*buf.sampleRate));
+  const out = ctx.createBuffer(buf.numberOfChannels, len, buf.sampleRate);
+  for (let ch=0; ch<buf.numberOfChannels; ch++) {
+    const d = buf.getChannelData(ch);
+    const o = out.getChannelData(ch);
+    for (let i=0;i<len;i++) o[i] = d[Math.floor(offS*buf.sampleRate)+i];
+  }
+  return out;
+}
+
+// 两段buffer crossfade混合（overlap秒）
+function crossfadeConcat(bufs, overlap=2.0) {
+  if (bufs.length===0) return null;
+  if (bufs.length===1) return bufs[0];
+  const ctx = getCtx();
+  let result = bufs[0];
+  for (let i=1;i<bufs.length;i++) {
+    const b = bufs[i];
+    const ov = Math.min(overlap, result.duration/2, b.duration/2);
+    const totalLen = Math.floor((result.duration + b.duration - ov) * result.sampleRate);
+    const out = ctx.createBuffer(result.numberOfChannels, totalLen, result.sampleRate);
+    for (let ch=0; ch<out.numberOfChannels; ch++) {
+      const rd = result.getChannelData(ch);
+      const od = b.getChannelData(ch);
+      const wd = out.getChannelData(ch);
+      // 前半：result原样
+      for (let j=0;j<rd.length;j++) wd[j] = rd[j];
+      // overlap区：crossfade
+      const ovStart = rd.length - Math.floor(ov*result.sampleRate);
+      const ovLen = Math.floor(ov*result.sampleRate);
+      for (let j=0;j<ovLen;j++) {
+        const fadeOut = Math.cos((j/ovLen)*Math.PI/2); // 1->0
+        const fadeIn = Math.sin((j/ovLen)*Math.PI/2);   // 0->1
+        wd[ovStart+j] = rd[ovStart+j]*fadeOut + od[j]*fadeIn;
+      }
+      // 后半：b剩余
+      const bStart = Math.floor(ov*b.sampleRate);
+      for (let j=bStart;j<od.length;j++) wd[rd.length - ovLen + (j-bStart)] = od[j];
+    }
+    result = out;
+  }
+  return result;
+}
+
+// AudioBuffer -> WAV blob
+function bufferToWav(buf) {
+  const numCh = buf.numberOfChannels;
+  const sampleRate = buf.sampleRate;
+  const bytesPerSample = 2;
+  const length = buf.length * numCh * bytesPerSample;
+  const ab = new ArrayBuffer(44 + length);
+  const view = new DataView(ab);
+  const writeStr = (off, s) => { for(let i=0;i<s.length;i++) view.setUint8(off+i, s.charCodeAt(i)); };
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36+length, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numCh, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate*numCh*bytesPerSample, true);
+  view.setUint16(32, numCh*bytesPerSample, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, "data");
+  view.setUint32(40, length, true);
+  let off = 44;
+  for (let i=0;i<buf.length;i++) {
+    for (let ch=0;ch<numCh;ch++) {
+      let s = Math.max(-1, Math.min(1, buf.getChannelData(ch)[i]));
+      view.setInt16(off, s<0?s*0x8000:s*0x7FFF, true);
+      off += 2;
+    }
+  }
+  return new Blob([ab], {type:"audio/wav"});
+}
+
+document.getElementById("exportAllBtn").onclick = async () => {
+  if (!STATE.segments.length) { alert("请先分析"); return; }
+  const bar = document.getElementById("pbar");
+  const st = document.getElementById("status");
+  st.textContent = "解码并裁剪每段音频...";
+  const bufs = [];
+  for (let i=0;i<STATE.segments.length;i++) {
+    const s = STATE.segments[i];
+    const cur = s.candidates[s.track];
+    const fh = SONG_MAP[cur.fn.toLowerCase()];
+    if (!fh) { st.textContent = `跳过${s.id}（找不到文件）`; continue; }
+    setProgress(bar, Math.round((i/STATE.segments.length)*90), `解码${s.id}`);
+    const full = await decodeAudioFile(fh);
+    const clipped = sliceBuffer(full, s.srcStart, s.srcDur);
+    bufs.push(clipped);
+  }
+  setProgress(bar, 92, "crossfade拼接...");
+  await new Promise(r=>setTimeout(r,100));
+  const mixed = crossfadeConcat(bufs, 2.0);
+  // 开头2秒淡入，结尾2秒淡出
+  applyFade(mixed, 2.0, 2.0);
+  setProgress(bar, 97, "导出WAV...");
+  const blob = bufferToWav(mixed);
+  const fname = `BGM_${STATE.duration.toFixed(0)}s.wav`;
+  if (OUT_DIR) {
+    const w = await OUT_DIR.getFileHandle(fname, {create:true});
+    const w2 = await w.createWritable();
+    await w2.write(blob);
+    await w2.close();
+    st.textContent = `✅ 已导出到 ${OUT_DIR.name}/${fname}`;
+  } else {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = fname;
+    a.click();
+    st.textContent = `✅ 已导出 ${fname}（${mixed.duration.toFixed(1)}秒）`;
+  }
+  setProgress(bar, 100, "完成");
+};
+
+function applyFade(buf, fadeIn, fadeOut) {
+  const sr = buf.sampleRate;
+  const fiLen = Math.floor(fadeIn*sr), foLen = Math.floor(fadeOut*sr);
+  for (let ch=0; ch<buf.numberOfChannels; ch++) {
+    const d = buf.getChannelData(ch);
+    for (let i=0;i<fiLen && i<d.length;i++) d[i] *= i/fiLen;
+    for (let i=0;i<foLen && i<d.length;i++) d[d.length-1-i] *= i/foLen;
+  }
+}
+
 function fmt(t) { t=Math.max(0,t|0); return `${(t/60)|0}:${String(t%60).padStart(2,'0')}`; }
 </script>
 </body>
