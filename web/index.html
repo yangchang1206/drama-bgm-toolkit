@@ -5,7 +5,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>BGM工作台 v2.3</title>
+<title>BGM工作台 v2.4</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
 <style>
@@ -71,7 +71,7 @@ input[type=range] { width: 100%; margin-top: 6px; }
 </head>
 <body>
 <h1>🎬 BGM 工作台</h1>
-<div class="ver">版本 v2.3 · crossfade修复+CORS代理优化</div>
+<div class="ver">版本 v2.4 · 越界修复+API超时保护</div>
 <div class="sub">纯前端 · 选音乐库 → 上传视频+剧本 → AI看图分析情绪 → 自动合并相似段 → 导出</div>
 
 <div id="globalErr"></div>
@@ -168,7 +168,7 @@ let curPreviewSource = null, curPreviewGain = null, playTimer = null, previewTok
 const CROSSFADE_SEC = 4.0, FADE_IN = 2.0, FADE_OUT = 3.0;
 const MERGE_SIM_THRESHOLD = 0.72, MAX_MUSIC_SEGMENTS = 4;
 
-// CORS代理列表（全部支持POST+自定义header）
+// CORS代理列表 + 30秒超时
 async function apiFetch(url, options) {
   const proxies = [
     u => "https://corsproxy.io/?url=" + encodeURIComponent(u),
@@ -177,21 +177,25 @@ async function apiFetch(url, options) {
   ];
   let lastErr = null;
   for (const buildUrl of proxies) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
     try {
       const fullUrl = buildUrl(url);
-      const r = await fetch(fullUrl, options);
+      const r = await fetch(fullUrl, { ...options, signal: controller.signal });
+      clearTimeout(timer);
       return r;
     } catch(e) {
+      clearTimeout(timer);
       lastErr = e;
       console.warn("proxy failed:", e.message);
     }
   }
-  throw lastErr || new Error("API请求失败（所有代理均不可用）");
+  throw lastErr || new Error("API请求失败（所有代理均不可用，请检查网络）");
 }
 
 function getCtx() { if (!actx) actx = new (window.AudioContext||window.webkitAudioContext)(); return actx; }
 function yieldUI() { return new Promise(r=>setTimeout(r,0)); }
-function esc(s) { return String(s==null?"":s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function esc(s) { return String(s==null?"":s).replace(/[&<>'"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 
 function stopPreview() {
   previewToken++;
@@ -376,7 +380,7 @@ async function embedText(text) {
   if (!API_KEY) throw new Error("请先填阿里云API Key");
   const r = await apiFetch("https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings", {
     method: "POST",
-    headers: { "Authorization": `Bearer ${API_KEY}`, "Content-Type": "application/json" },
+    headers: { "Authorization": `Bearer ${API_KEY}", "Content-Type": "application/json" },
     body: JSON.stringify({ model: "text-embedding-v3", input: [text], dimensions: 1024, encoding_format: "float" })
   });
   const j = await r.json();
@@ -437,7 +441,7 @@ async function aiMoodQuery(dataUrl, scriptText) {
   const prompt = `这是短剧某一BGM段的中间画面截图。\n剧本片段：\n${scriptText.slice(0, 800)}\n\n任务：根据画面里主角的表情、动作、氛围，用15-25个英文单词描述这段应该配什么BGM情绪和风格。要求：\n1. 贴主角内心情绪（tense/relieved/determined/warm/angry/sad/vulnerable/triumphant/suspenseful等）\n2. 纯器乐，无人声（instrumental, no vocals）\n3. 只输出英文query一行`;
   const r = await apiFetch("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", {
     method: "POST",
-    headers: { "Authorization": `Bearer ${API_KEY}`, "Content-Type": "application/json" },
+    headers: { "Authorization": `Bearer ${API_KEY}", "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "qwen-vl-flash",
       messages: [{ role: "user", content: [
@@ -784,8 +788,14 @@ document.getElementById("analyzeBtn").onclick = async () => {
 function sliceBuffer(buf, off, dur) {
   const ctx = getCtx();
   const offS = Math.max(0, off);
-  const take = Math.min(dur, Math.max(0.1, buf.duration - offS));
-  const len = Math.max(0, Math.floor(take*buf.sampleRate));
+  // 防越界：起始位置超过音频长度时返回静音buffer
+  if (offS >= buf.duration - 0.05) {
+    const len = Math.max(1, Math.floor(Math.min(dur, 2) * buf.sampleRate));
+    return ctx.createBuffer(buf.numberOfChannels, len, buf.sampleRate);
+  }
+  const remain = buf.duration - offS;
+  const take = Math.min(dur, Math.max(0.1, remain));
+  const len = Math.max(1, Math.floor(take*buf.sampleRate));
   const out = ctx.createBuffer(buf.numberOfChannels, len, buf.sampleRate);
   for (let ch=0; ch<buf.numberOfChannels; ch++) {
     const d = buf.getChannelData(ch); const o = out.getChannelData(ch);
@@ -806,26 +816,18 @@ async function crossfadeConcatAsync(bufs, overlap) {
     const ovLen = Math.floor(ov * result.sampleRate);
     const rdLen = result.length;
     const odLen = b.length;
-    // total = result + b - overlap
     const totalLen = rdLen + odLen - ovLen;
     const out = ctx.createBuffer(result.numberOfChannels, totalLen, result.sampleRate);
     for (let ch=0; ch<out.numberOfChannels; ch++) {
       const rd = result.getChannelData(ch);
       const od = b.getChannelData(ch);
       const wd = out.getChannelData(ch);
-      // Layout:
-      // [0, rdLen - ovLen): result only
-      // [rdLen - ovLen, rdLen): overlap mixed
-      // [rdLen, totalLen): b only (from b sample ovLen onward)
-      // 1. copy result
       for (let j=0;j<rdLen;j++) wd[j] = rd[j];
-      // 2. overlap region
       for (let j=0;j<ovLen;j++) {
-        const fo = Math.cos((j/ovLen)*Math.PI/2); // result fades out
-        const fi = Math.sin((j/ovLen)*Math.PI/2); // b fades in
+        const fo = Math.cos((j/ovLen)*Math.PI/2);
+        const fi = Math.sin((j/ovLen)*Math.PI/2);
         wd[rdLen - ovLen + j] = rd[rdLen - ovLen + j]*fo + od[j]*fi;
       }
-      // 3. b continuation (FIXED: starts at rdLen, not rdLen-ovLen)
       for (let j=ovLen;j<odLen;j++) {
         wd[rdLen + (j - ovLen)] = od[j];
       }
