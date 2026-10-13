@@ -157,6 +157,7 @@ window.addEventListener("unhandledrejection", function(e) {
 });
 
 var EMB = [], SONG_MAP = {}, OUT_DIR = null;
+var EMB_DIM = 0;   // 索引向量维度，加载索引时探测
 var LIB_READY = false;
 var API_KEY = localStorage.getItem("dashscope_key") || "";
 var STATE = { segments: [], cur: 0, duration: 0 };
@@ -304,8 +305,21 @@ async function loadEmb() {
       }, 20000);
       rb.textContent = "⏳ 解析向量索引...";
       EMB = JSON.parse(text);
-      var inst = EMB.filter(function(e){return e.voc!=="yes";}).length;
-      rb.innerHTML = "✅ <b>就绪</b>：共" + EMB.length + "首，纯器乐" + inst + "首";
+      var probe = EMB[0] ? getVec(EMB[0]) : null;
+      if (!probe) {
+        rb.innerHTML = "❌ <b>索引格式不对</b>：缺少向量字段（需要 v / q / vec）。请用 tools/build_web_index.py 重新生成索引。";
+        rb.style.background = "#fee2e2"; rb.style.color = "#991b1b";
+        return;
+      }
+      EMB_DIM = atob(probe).length;
+      if (EMB_DIM !== 1024) {
+        rb.innerHTML = "⚠️ <b>索引向量空间不匹配</b>：当前索引 " + EMB_DIM + " 维，而情绪查询用的是 DashScope text-embedding-v3（1024 维）。" +
+          "两者不同空间，选曲会全部落空。请用 tools/build_web_index.py 重新生成索引。";
+        rb.style.background = "#fee2e2"; rb.style.color = "#991b1b";
+        return;
+      }
+      var inst = EMB.filter(function(e){return !vocIsVocal(e.voc);}).length;
+      rb.innerHTML = "✅ <b>就绪</b>：共" + EMB.length + "首，纯器乐" + inst + "首（" + EMB_DIM + "维）";
       rb.style.background = "#dcfce7"; rb.style.color = "#15803d";
       return;
     } catch(e) {
@@ -371,7 +385,7 @@ document.getElementById("analyzeLibBtn").onclick = async function() {
   var matched = 0, list = [];
   for (var i=0; i<EMB.length; i++) {
     var e = EMB[i];
-    if (e.voc === "yes") continue;
+    if (vocIsVocal(e.voc)) continue;
     if (SONG_MAP[e.fn.toLowerCase()]) { matched++; list.push(e.fn); }
   }
   setProgress(bar, 100, "完成：匹配 " + matched + " 首");
@@ -403,6 +417,8 @@ async function embedText(text) {
   return j.data[0].embedding;
 }
 
+function getVec(e) { return e.v || e.q || e.vec || null; }
+function vocIsVocal(v) { return v === "yes" || v === "是" || v === "疑似"; }
 function decodeVec(b64) {
   var bin = atob(b64);
   var arr = new Float32Array(bin.length);
@@ -639,7 +655,8 @@ async function renderDetail() {
     "<div class='query-box'>🔍 "+esc(s.query||"")+"</div>"+
     "<div class='song sel'>"+esc(cand.fn)+" ("+(cand.sim||0).toFixed(2)+")</div>"+
     "<div style='margin-top:8px;'>"+
-    "<label style='font-size:12px;'>起始: <input type='number' id='st' value='"+(s.srcStart||2).toFixed(1)+"' step='0.5' style='width:70px;'>s</label> "+n    "<label style='font-size:12px;'>时长: <input type='number' id='dur' value='"+(s.srcDur||30).toFixed(1)+"' step='0.5' style='width:70px;'>s</label>"+
+    "<label style='font-size:12px;'>起始: <input type='number' id='st' value='"+(s.srcStart||2).toFixed(1)+"' step='0.5' style='width:70px;'>s</label> "+
+    "<label style='font-size:12px;'>时长: <input type='number' id='dur' value='"+(s.srcDur||30).toFixed(1)+"' step='0.5' style='width:70px;'>s</label>"+
     "</div><div id='cands' style='margin-top:8px;'></div>"+
     "<button id='previewBtn'>▶ 播放</button>"+
     "<button id='pauseBtn' class='secondary'>⏸ 停止</button>"+
@@ -779,9 +796,10 @@ document.getElementById("analyzeBtn").onclick = async function() {
       setProgress(bar, 60 + Math.round((g/mergedGroups.length)*30), "选曲组"+(g+1)+"/"+mergedGroups.length);
       await yieldUI();
       var qn = norm(Array.from(avgVec));
-      var scores = EMB.filter(function(e){ return e.voc !== "yes" && SONG_MAP[e.fn.toLowerCase()] && !usedSongs.has(e.fn); })
+      if (qn.length !== EMB_DIM) throw new Error("向量空间不匹配：查询 " + qn.length + " 维 / 索引 " + EMB_DIM + " 维。请用 tools/build_web_index.py 重建索引");
+      var scores = EMB.filter(function(e){ return !vocIsVocal(e.voc) && SONG_MAP[e.fn.toLowerCase()] && !usedSongs.has(e.fn); })
         .map(function(e) {
-          try { var en = norm(decodeVec(e.v)); var sc=0; for(var j=0;j<qn.length;j++) sc+=qn[j]*en[j]; return {sim:sc, fn:e.fn}; }
+          try { var en = norm(decodeVec(getVec(e))); var sc=0; for(var j=0;j<qn.length;j++) sc+=qn[j]*en[j]; return {sim:sc, fn:e.fn}; }
           catch(err){ return null; }
         })
         .filter(Boolean);
