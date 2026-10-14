@@ -14,4 +14,8 @@ transformers>=4.40.0
 # Local voice detection
 silero-vad>=6.0.0
 
+# Optional: only needed by the Gradio server workbench (app.py)
+# gradio>=4.0.0
+
 # ffmpeg must be installed separately for trim/convert: https://ffmpeg.org/download.html
+# Node.js is optional: tools/check_inline_js.py uses it to syntax-check web/index.html

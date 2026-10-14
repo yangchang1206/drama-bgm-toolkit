@@ -76,16 +76,78 @@ HuggingFace 直连必超时，`config.py` 已默认设镜像：
 HF_ENDPOINT = "https://hf-mirror.com"
 ```
 
+## 两个工作台（不要混淆）
+
+| | 服务端工作台 | 浏览器工作台 |
+|---|---|---|
+| 入口 | `app.py`（Gradio） | `web/index.html`（单文件，双击打开） |
+| 依赖 | Python + torch + ffmpeg | Chromium 系浏览器 + 阿里云 DashScope Key |
+| 检索 | CLAP 音频向量（512 维，SQLite） | DashScope `text-embedding-v3`（1024 维，JSON 索引） |
+| 适用 | 稳定批量生产、需要精确调试 | 非技术同学一键出片、无需装环境 |
+
+两者共享方法论，但**向量空间与代码完全独立，索引不可互换**。
+
+### 浏览器工作台首次使用
+
+1. 用 Chromium 浏览器打开 `web/index.html`；
+2. 填入阿里云 DashScope API Key（保存在浏览器 localStorage）；
+3. 生成向量索引（**必须做，否则选曲全部落空**）：
+
+```bash
+set DASHSCOPE_API_KEY=sk-xxxx
+python tools/build_web_index.py --db music_db.sqlite --out web/web_embeddings.json
+```
+
+4. 选音乐文件夹 → 匹配向量库 → 粘剧本 + 选视频 → 分析 → 导出。
+
+### 索引格式契约（改动前端/索引时必须遵守）
+
+`web_embeddings.json` 是数组，元素：
+
+```json
+{"fn": "曲名.mp3", "voc": "no", "dur": 194.1, "v": "<base64>"}
+```
+
+* `fn`：音频文件名，前端按**小写文件名**与本地文件对齐；
+* `voc`：`"yes"`（有人声/疑似，前端会过滤）或 `"no"`；中文 `是/疑似` 也识别；
+* `dur`：时长（秒），可选；
+* `v`：base64(1024 字节)，**1 字节 = 1 维**，前端解码为 `(byte - 128) / 127`。
+
+> 关键约束：索引向量必须与查询侧 `text-embedding-v3`（1024 维）**同一向量空间**。
+> 索引维度不是 1024 时，前端会直接报「向量空间不匹配」并中止（不会静默返回空结果）。
+
+## 开发守则
+
+* **改完 `web/index.html` 必须做一次内联脚本语法校验**：
+
+```bash
+python tools/check_inline_js.py web/index.html
+```
+
+  HTML 里的 `<script>` 一旦有 SyntaxError，浏览器会整段不执行，表现为「按钮全部无响应」且无任何提示。
+  本项目曾因单行残留字符（`+n`）让整个前端失效，故固化为工具，建议接入提交前检查。
+
 ## 目录结构
 
 ```
-├── config.py           # ★只改这个
-├── build_db.py         # 一键建库
-├── clap_search.py      # 自然语言搜曲
+├── config.py                  # ★只改这个
+├── build_db.py                # 一键建库（librosa + CLAP + VAD）
+├── clap_search.py             # 自然语言搜曲（CLI）
+├── app.py                     # 服务端工作台（Gradio）
 ├── requirements.txt
-├── README.md           # 英文说明
-├── README_zh.md        # 本文件
-├── SKILL.md            # 完整方法论
-└── scripts/
-    └── crossfade.py    # 拼接模板
+├── README.md                  # 英文说明
+├── README_zh.md               # 本文件
+├── SKILL.md                   # 完整方法论（Leitmotif 配乐法，必读）
+├── 使用手册.md                 # 面向使用者的分步手册
+├── 一键建库.bat / 搜曲.bat / 启动网页.bat
+├── tools/
+│   ├── build_web_index.py     # 生成浏览器工作台的向量索引
+│   └── check_inline_js.py     # 内联 JS 语法校验
+├── scripts/
+│   └── crossfade.py           # 拼接模板（含能量归一化）
+└── web/
+    ├── index.html             # 浏览器工作台（单文件）
+    ├── web_embeddings.json    # 向量索引（由 tools/build_web_index.py 生成）
+    └── README.md
 ```
+

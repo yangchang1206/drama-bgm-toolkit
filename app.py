@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Short drama BGM auto-generator web UI.
-Flow: paste script -> upload video -> auto segment -> auto search -> crossfade -> MP3
-Run: python app.py
+短剧BGM工作台
+布局：左(剧本/视频) | 中(情绪弧线时间线) | 右(段详情编辑)
 """
-import os, re, sys, subprocess, sqlite3, math, wave, struct, time
+import os, re, sys, subprocess, sqlite3, math, wave, struct, json, time
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -12,6 +11,7 @@ import config
 
 import gradio as gr
 
+# ============ 基础工具 ============
 
 def probe_video_duration(video_path):
     try:
@@ -60,7 +60,7 @@ def get_model():
     return _MODEL, _PROCESSOR
 
 
-def search_music(query, top_n=3, no_vocal=True):
+def search_music(query, top_n=10, no_vocal=True):
     model, processor = get_model()
     import torch
     inp = processor(text=[query], return_tensors="pt", padding=True)
@@ -69,20 +69,36 @@ def search_music(query, top_n=3, no_vocal=True):
         te = out.pooler_output.numpy()[0]
         te = te / np.linalg.norm(te)
     conn = sqlite3.connect(config.DB_PATH)
-    sql = """SELECT s.id, s.filename, s.fullpath, s.bpm, s.rms, s.duration, e.embed
+    sql = """SELECT s.id, s.filename, s.fullpath, s.bpm, s.duration, e.embed
              FROM songs s JOIN clap_embeds e ON s.id=e.song_id WHERE 1=1"""
     if no_vocal:
         sql += " AND s.has_vocals='no'"
     rows = conn.execute(sql).fetchall()
     conn.close()
     scores = []
-    for sid, fn, fp, bpm, rms, dur, emb in rows:
+    for sid, fn, fp, bpm, dur, emb in rows:
         ae = np.frombuffer(emb, dtype=np.float32)
         ae = ae / (np.linalg.norm(ae) + 1e-8)
         sim = float((te * ae).sum())
-        scores.append((sim, fn, fp, bpm, dur))
-    scores.sort(reverse=True)
+        scores.append({"sim": round(sim, 3), "filename": fn, "path": fp,
+                       "bpm": bpm, "duration": dur})
+    scores.sort(key=lambda x: -x["sim"])
     return scores[:top_n]
+
+
+# 情绪关键词 → 查询词
+MOOD_MAP = {
+    "紧张/对峙": ("tense confrontation dark cinematic suspense", "steady"),
+    "打斗/爆发": ("intense battle action percussion epic", "climax"),
+    "悲伤/委屈": ("sad emotional piano melancholic lonely", "calm"),
+    "温暖/治愈": ("warm heartfelt strings family healing", "steady"),
+    "愤怒/反击": ("angry intense dramatic buildup", "climax"),
+    "冷静/霸气": ("calm determined cold resolve epic", "steady"),
+    "惊喜/发现": ("wonder discovery magical uplifting", "climax"),
+    "阴谋/悬疑": ("mysterious conspiracy ominous low drone", "calm"),
+    "回忆/怀旧": ("nostalgic memory sentimental piano", "calm"),
+    "温馨/日常": ("cozy gentle acoustic guitar peaceful", "calm"),
+}
 
 
 def pick_clip_position(audio_path, target_duration, mood="steady"):
@@ -97,29 +113,20 @@ def pick_clip_position(audio_path, target_duration, mood="steady"):
     best_score = -1e9
     mean_rms = np.mean(rms)
     for start_frame in range(0, len(rms) - int(target_duration*sr/hop), int(sr/hop)):
-        seg_rms = rms[start_frame:start_frame + int(target_duration*sr/hop)]
-        seg_mean = np.mean(seg_rms)
-        seg_var = np.var(seg_rms)
+        seg = rms[start_frame:start_frame + int(target_duration*sr/hop)]
+        sm = np.mean(seg); sv = np.var(seg)
         if mood == "climax":
-            score = seg_mean * 2 - seg_var * 0.1
+            score = sm * 2 - sv * 0.1
         elif mood == "calm":
-            score = -seg_mean - seg_var * 0.5
+            score = -sm - sv * 0.5
         else:
-            score = -abs(seg_mean - mean_rms) - seg_var * 0.2
+            score = -abs(sm - mean_rms) - sv * 0.2
         if score > best_score:
-            best_score = score
-            best_start = start_frame
-    start_sec = best_start * hop / sr
-    return start_sec, start_sec + target_duration
+            best_score = score; best_start = start_frame
+    return best_start * hop / sr, best_start * hop / sr + target_duration
 
 
-def trim_audio(src_path, start, end, out_wav):
-    subprocess.run([
-        "ffmpeg", "-y", "-ss", str(start), "-to", str(end),
-        "-i", src_path, "-ar", "44100", "-ac", "1",
-        "-acodec", "pcm_s16le", out_wav
-    ], check=True, capture_output=True)
-
+# ============ crossfade ============
 
 def read_wav(path):
     w = wave.open(path, 'rb')
@@ -158,122 +165,270 @@ def crossfade_wavs(wav_paths, out_wav, overlap=2.0, target_rms=0.12):
     out = np.zeros(total_frames * nch0, dtype=np.float64)
     for i, seg in enumerate(norm):
         slen = len(seg) // nch0
-        fin = int(overlap * fr0)
-        fout = int(overlap * fr0)
         for fr in range(slen):
             g = 1.0
-            if i == 0 and fr < fin:
-                g *= eq_power(fr/fin, 'in')
-            if i == len(norm)-1 and fr >= slen - fout:
-                g *= eq_power((slen-fr)/fout, 'out')
-            if g <= 0.001:
-                continue
+            if i == 0 and fr < overlap_frames:
+                g *= eq_power(fr/overlap_frames, 'in')
+            if i == len(norm)-1 and fr >= slen - overlap_frames:
+                g *= eq_power((slen-fr)/overlap_frames, 'out')
+            if g <= 0.001: continue
             for c in range(nch0):
                 out[(starts[i]+fr)*nch0+c] += seg[fr*nch0+c] * g
     peak = float(np.max(np.abs(out)))
-    if peak > 0.95:
-        out *= 0.95 / peak
+    if peak > 0.95: out *= 0.95 / peak
     write_wav(out_wav, fr0, nch0, out)
     return total_frames / fr0
 
 
-def generate_bgm(script_text, video_file, mood_override="", progress=gr.Progress()):
+# ============ 工作台状态 ============
+
+# state: {"duration": float, "segments": [{"id","mood","query","track_idx","candidates","start","end","wav"}], "video": path}
+
+def do_analyze(script_text, video_file, progress=gr.Progress()):
     if not script_text or not video_file:
-        return None, "Please paste script and upload video"
-    progress(0.05, desc="Probing video...")
+        return None, "请粘贴剧本并上传视频", ""
+    progress(0.1, "探测视频时长...")
     duration = probe_video_duration(video_file)
     if not duration:
-        return None, "Cannot read video duration. Is ffmpeg installed?"
-    progress(0.1, desc="Parsing scenes...")
+        return None, "无法读取视频时长", ""
     scenes = parse_script_scenes(script_text)
     if not scenes:
         scenes = [{"id": "full", "text": script_text}]
     n = len(scenes)
-    segment_len = duration / n
+    seg_len = duration / n
     overlap = 2.0
-    actual_seg_len = segment_len + overlap * (n-1) / n
-    progress(0.2, desc=f"{n} scenes, ~{segment_len:.1f}s each")
+    actual_seg_len = seg_len + overlap * (n-1) / n
 
-    work_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_work")
-    os.makedirs(work_dir, exist_ok=True)
-
-    default_moods = {
-        "对峙": ("tense confrontation dark cinematic suspense", "steady"),
-        "打斗": ("intense battle action percussion epic", "climax"),
-        "悲伤": ("sad emotional piano melancholic lonely", "calm"),
-        "温暖": ("warm heartfelt strings family healing", "steady"),
-        "温馨": ("cozy gentle acoustic peaceful", "calm"),
-        "愤怒": ("angry intense dramatic buildup", "climax"),
-        "冷静": ("calm determined cold resolve", "steady"),
-        "惊喜": ("wonder discovery magical uplifting", "climax"),
-        "阴谋": ("mysterious conspiracy ominous low drone", "calm"),
-        "回忆": ("nostalgic memory sentimental piano", "calm"),
-    }
-
-    wav_paths = []
-    log_lines = [f"Video: {duration:.1f}s, {n} scenes"]
-
+    progress(0.2, f"分{n}场，自动选曲...")
+    segments = []
     for i, scene in enumerate(scenes):
-        progress(0.2 + 0.6*i/n, desc=f"Scene {i+1}/{n}")
+        progress(0.2 + 0.6*i/n, f"场{scene['id']}搜曲...")
         text = scene["text"]
-        query = ""
-        mood = "steady"
-        for kw, (q, m) in default_moods.items():
-            if kw in text:
-                query = q
-                mood = m
+        # 自动识别情绪
+        detected = "紧张/对峙"
+        for kw, (q, m) in MOOD_MAP.items():
+            if any(k in text for k in kw.split("/")):
+                detected = kw
                 break
-        if not query:
-            query = "emotional cinematic drama underscore"
-        if mood_override:
-            query = mood_override
-        results = search_music(query, top_n=3, no_vocal=True)
-        if not results:
-            log_lines.append(f"Scene {scene['id']}: no match")
+        query, mood = MOOD_MAP[detected]
+        cands = search_music(query, top_n=10)
+        if not cands:
             continue
-        sim, fn, fp, bpm, dur = results[0]
-        log_lines.append(f"Scene {scene['id']}: {fn[:40]} ({sim:.2f})")
+        track = cands[0]
         try:
-            start, end = pick_clip_position(fp, actual_seg_len, mood=mood)
-            out_wav = os.path.join(work_dir, f"seg{i+1}.wav")
-            trim_audio(fp, start, end, out_wav)
-            wav_paths.append(out_wav)
-        except Exception as e:
-            log_lines.append(f"Scene {scene['id']}: trim failed {e}")
+            start, end = pick_clip_position(track["path"], actual_seg_len, mood=mood)
+        except Exception:
+            start, end = 0, actual_seg_len
+        segments.append({
+            "id": scene["id"], "time_start": round(i*seg_len, 1),
+            "time_end": round((i+1)*seg_len, 1),
+            "mood": detected, "query": query,
+            "candidates": cands, "track_idx": 0,
+            "start": round(start, 1), "end": round(end, 1),
+            "wav": None
+        })
 
-    if not wav_paths:
-        return None, "No segments produced"
+    state = {"duration": duration, "segments": segments, "video": video_file}
+    # 中间时间线显示
+    timeline = "\n".join(
+        f"【{s['id']}】{s['time_start']}-{s['time_end']}s | {s['mood']} | {s['candidates'][s['track_idx']]['filename'][:35]}"
+        for s in segments
+    )
+    return state, f"✅ 完成：视频{duration:.1f}s，分{n}段。点中间段查看详情。", timeline
 
-    progress(0.85, desc="Crossfading...")
-    full_wav = os.path.join(work_dir, "crossfade_full.wav")
-    total = crossfade_wavs(wav_paths, full_wav, overlap=overlap)
 
-    progress(0.95, desc="Exporting MP3...")
-    out_mp3 = os.path.join(work_dir, "output_bgm.mp3")
+def show_segment(state, idx):
+    if not state or not state.get("segments"):
+        return state, "未分析", "", 0, 0, "", ""
+    idx = int(idx)
+    s = state["segments"][idx]
+    cands = s["candidates"]
+    cur = cands[s["track_idx"]]
+    # 试听该段
+    work = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_work")
+    os.makedirs(work, exist_ok=True)
+    wav_path = os.path.join(work, f"seg_preview_{idx}.wav")
     subprocess.run([
-        "ffmpeg", "-y", "-i", full_wav,
-        "-t", str(duration),
-        "-codec:a", "libmp3lame", "-b:a", "192k",
-        out_mp3
+        "ffmpeg", "-y", "-ss", str(s["start"]), "-to", str(s["end"]),
+        "-i", cur["path"], "-ar", "44100", "-ac", "1", "-acodec", "pcm_s16le", wav_path
+    ], capture_output=True)
+    s["wav"] = wav_path
+    # 候选列表
+    cand_list = "\n".join(
+        f"[{i}] {c['filename'][:50]} (相似度{c['sim']})" for i, c in enumerate(cands)
+    )
+    return (state,
+            f"段{idx+1} / {len(state['segments'])}",
+            cur["filename"],
+            s["start"], s["end"],
+            s["mood"], cand_list)
+
+
+def change_track(state, idx, new_track_idx):
+    if not state: return state, "未分析"
+    idx = int(idx)
+    new_track_idx = int(new_track_idx)
+    s = state["segments"][idx]
+    if new_track_idx < len(s["candidates"]):
+        s["track_idx"] = new_track_idx
+        # 重新选截取点
+        query, mood = MOOD_MAP.get(s["mood"], ("emotional cinematic", "steady"))
+        try:
+            st, en = pick_clip_position(s["candidates"][new_track_idx]["path"],
+                                        s["time_end"]-s["time_start"]+2, mood=mood)
+            s["start"], s["end"] = round(st,1), round(en,1)
+        except Exception:
+            pass
+    return show_segment(state, idx)[:6] + ("",)
+
+
+def adjust_clip(state, idx, new_start, new_end):
+    if not state: return state
+    idx = int(idx)
+    state["segments"][idx]["start"] = float(new_start)
+    state["segments"][idx]["end"] = float(new_end)
+    return state
+
+
+def do_export(state, progress=gr.Progress()):
+    if not state or not state["segments"]:
+        return None, "请先分析"
+    progress(0.1, "裁剪各段...")
+    work = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_work")
+    os.makedirs(work, exist_ok=True)
+    wav_paths = []
+    for i, s in enumerate(state["segments"]):
+        track = s["candidates"][s["track_idx"]]
+        wav = os.path.join(work, f"seg_{i}.wav")
+        subprocess.run([
+            "ffmpeg", "-y", "-ss", str(s["start"]), "-to", str(s["end"]),
+            "-i", track["path"], "-ar", "44100", "-ac", "1", "-acodec", "pcm_s16le", wav
+        ], capture_output=True)
+        wav_paths.append(wav)
+    progress(0.7, "crossfade叠加拼接...")
+    full_wav = os.path.join(work, "crossfade_full.wav")
+    total = crossfade_wavs(wav_paths, full_wav, overlap=2.0)
+    progress(0.9, "导出MP3...")
+    out_mp3 = os.path.join(work, "output_bgm.mp3")
+    subprocess.run([
+        "ffmpeg", "-y", "-i", full_wav, "-t", str(state["duration"]),
+        "-codec:a", "libmp3lame", "-b:a", "192k", out_mp3
     ], check=True, capture_output=True)
-
-    log_lines.append(f"Done! {total:.1f}s -> {out_mp3}")
-    return out_mp3, "\n".join(log_lines)
+    return out_mp3, f"✅ 导出完成！{state['duration']:.1f}s"
 
 
-with gr.Blocks(title="Drama BGM Generator") as demo:
-    gr.Markdown("# Drama BGM Generator\nPaste script -> upload video -> auto search & crossfade -> MP3")
+# ============ UI ============
+
+CUSTOM_CSS = """
+#main-title { text-align:center; margin-bottom:4px; }
+#main-title h1 { font-size:26px; font-weight:700; color:#1a1a2e; margin:0; }
+#subtitle { text-align:center; color:#888; margin-bottom:14px; font-size:13px; }
+"""
+
+with gr.Blocks(title="BGM工作台", css=CUSTOM_CSS) as demo:
+    gr.HTML('<div id="main-title"><h1>🎬 BGM 工作台</h1></div>', elem_id="main-title")
+    gr.HTML('<div id="subtitle">剧本 + 视频 → 自动分段选曲 → 可视化调整 → 导出MP3</div>', elem_id="subtitle")
+
+    state = gr.State({})
+    cur_idx = gr.State(0)
+
+    # 音乐库管理
+    with gr.Accordion("⚙️ 音乐库设置", open=False):
+        def get_db_status():
+            try:
+                import importlib; importlib.reload(config)
+            except Exception: pass
+            root = config.MUSIC_ROOT
+            db = config.DB_PATH
+            if not os.path.exists(db):
+                return f"当前库: {root}\n数据库未建立"
+            try:
+                conn = sqlite3.connect(db)
+                total = conn.execute("SELECT COUNT(*) FROM songs").fetchone()[0]
+                inst = conn.execute("SELECT COUNT(*) FROM songs WHERE has_vocals='no'").fetchone()[0]
+                conn.close()
+                return f"当前库: {root}\n歌曲: {total} 首（纯器乐 {inst}）"
+            except Exception as e:
+                return f"当前库: {root}\n错误: {e}"
+
+        def switch_lib(new_path):
+            global _MODEL, _PROCESSOR
+            new_path = new_path.strip().strip('"').strip("'")
+            if not os.path.isdir(new_path):
+                return f"路径不存在: {new_path}"
+            cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.py")
+            with open(cfg_path, "r", encoding="utf-8") as f: c = f.read()
+            c = re.sub(r'MUSIC_ROOT\s*=\s*r?"[^"]*"', f'MUSIC_ROOT = r"{new_path}"', c)
+            with open(cfg_path, "w", encoding="utf-8") as f: f.write(c)
+            import importlib; importlib.reload(config)
+            _MODEL = None; _PROCESSOR = None
+            return get_db_status()
+
+        db_status = gr.Textbox(label="数据库状态", value=get_db_status(), lines=3, interactive=False)
+        new_path = gr.Textbox(label="新音乐库路径", placeholder=r"如 D:\AA-音色")
+        with gr.Row():
+            sw = gr.Button("切换此库")
+            bb = gr.Button("🔨 建库（首次30-60分钟）")
+        sw.click(switch_lib, [new_path], [db_status])
+
     with gr.Row():
+        # 左：输入
         with gr.Column(scale=1):
-            script_input = gr.Textbox(label="Script (paste full episode)", lines=15)
-            video_input = gr.File(label="Episode video", file_types=[".mp4", ".mov", ".avi"])
-            mood_input = gr.Textbox(label="Mood override (English, optional)", placeholder="tense thriller dark cinematic")
-            btn = gr.Button("Generate BGM", variant="primary")
-        with gr.Column(scale=1):
-            audio_out = gr.Audio(label="Generated BGM")
-            log_out = gr.Textbox(label="Log", lines=15)
-    btn.click(fn=generate_bgm, inputs=[script_input, video_input, mood_input], outputs=[audio_out, log_out])
+            gr.Markdown("### ① 输入")
+            script_in = gr.Textbox(label="剧本", lines=10,
+                                   placeholder="粘贴整集剧本（含 41-1、41-2 等场号）")
+            video_in = gr.File(label="集数视频", file_types=[".mp4",".mov",".avi"])
+            analyze_btn = gr.Button("🔍 分析并自动选曲", variant="primary")
+            status = gr.Textbox(label="状态", lines=2, interactive=False)
+
+        # 中：时间线
+        with gr.Column(scale=1.2):
+            gr.Markdown("### ② 情绪弧线时间线")
+            timeline = gr.Textbox(label="各段（点序号查看）", lines=12, interactive=False)
+            seg_selector = gr.Dropdown(label="选择段", choices=[], interactive=True)
+            export_btn = gr.Button("🎵 生成并导出MP3", variant="primary")
+
+        # 右：详情
+        with gr.Column(scale=1.2):
+            gr.Markdown("### ③ 段详情")
+            seg_label = gr.Textbox(label="当前段", interactive=False)
+            track_name = gr.Textbox(label="选中曲目", interactive=False)
+            start_in = gr.Number(label="截取开始(秒)", value=0)
+            end_in = gr.Number(label="截取结束(秒)", value=30)
+            mood_in = gr.Dropdown(label="情绪", choices=list(MOOD_MAP.keys()), value="紧张/对峙")
+            preview_audio = gr.Audio(label="试听此段")
+            cand_in = gr.Dropdown(label="换一首（从候选）", choices=[])
+            change_btn = gr.Button("换曲")
+            adjust_btn = gr.Button("应用截取点调整")
+
+    # 事件
+    analyze_btn.click(do_analyze, [script_in, video_in], [state, status, timeline]).then(
+        lambda s: (gr.update(choices=[f"段{i+1} ({seg['id']})" for i, seg in enumerate(s.get('segments',[]))]),
+                   gr.update(choices=[str(i) for i in range(10)])),
+        inputs=[state], outputs=[seg_selector, cand_in]
+    )
+
+    seg_selector.change(
+        lambda s, c: (int(c.split(" ")[0].replace("段",""))-1,) if c else (0,),
+        inputs=[state, seg_selector], outputs=[cur_idx]
+    ).then(
+        show_segment, [state, cur_idx],
+        [state, seg_label, track_name, start_in, end_in, mood_in, cand_in]
+    ).then(
+        lambda s, idx: (s["segments"][int(idx)]["wav"],) if s and s.get("segments") else (None,),
+        inputs=[state, cur_idx], outputs=[preview_audio]
+    )
+
+    change_btn.click(change_track, [state, cur_idx, cand_in],
+                     [state, seg_label, track_name, start_in, end_in, mood_in, cand_in]).then(
+        lambda s, idx: (s["segments"][int(idx)]["wav"],) if s and s.get("segments") else (None,),
+        inputs=[state, cur_idx], outputs=[preview_audio]
+    )
+
+    adjust_btn.click(adjust_clip, [state, cur_idx, start_in, end_in], [state])
+
+    export_btn.click(do_export, [state], [preview_audio, status])
 
 
 if __name__ == "__main__":
-    demo.launch(inbrowser=True)
+    demo.launch(inbrowser=True, share=True)
