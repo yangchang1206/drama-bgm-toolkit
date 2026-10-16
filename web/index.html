@@ -87,7 +87,9 @@ input[type=range] { width: 100%; margin-top: 6px; }
 
 <div class="api-box" style="padding-top:0;">
   <label>🌐 接口地址:</label>
-  <input type="text" id="apiBase" placeholder="留空 = 阿里云百炼官方；若你的 Key 来自第三方中转站，填该站完整地址（如 https://xxx.com/v1）">
+  <input type="text" id="apiBase" placeholder="留空 = 阿里云百炼官方；第三方中转 Key 填该站完整地址（如 https://xxx.com/v1）" style="flex:2;">
+  <label>👁 看图模型:</label>
+  <input type="text" id="vlModel" placeholder="留空 = 自动降级（qwen3.8-flash → …）" style="flex:1; min-width:160px;">
 </div>
 
 <div style="padding:0 16px 10px; display:grid; grid-template-columns:1fr 1fr; gap:10px;">
@@ -181,6 +183,23 @@ function normBase(b) {
   return b;
 }
 function apiUrl(path) { return normBase(API_BASE) + path; }
+
+// 视觉理解模型候选链：DashScope **没有 qwen-vl-flash 这个模型**（旧版命名是 qwen-vl-plus/max，
+// 现已换成 Qwen3 系列），写死一个名字必然报 model_not_found：
+//   The model `qwen-vl-flash` does not exist or you do not have access to it.
+// 且不同账号开通的模型权限不同 ⇒ 按「便宜 → 强」逐个试，命中后本次会话固定复用。
+var VL_MODELS = [
+  "qwen3.8-flash", "qwen3.7-flash", "qwen3.6-flash", "qwen3.5-flash",
+  "qwen3-vl-plus", "qwen3.8-max",
+  "qwen-vl-max-latest", "qwen-vl-plus-latest"
+];
+var VL_MODEL = storeGet("dashscope_vl_model") || "";   // 手动指定则排在最前
+var vlModelOk = null;    // 本次会话已确认可用的模型
+var vlAllFailed = null;  // 整条链都失败时缓存原因，避免每个分段都重复试错
+function vlCandidates() {
+  if (!VL_MODEL) return VL_MODELS.slice();
+  return [VL_MODEL].concat(VL_MODELS.filter(function(m){ return m !== VL_MODEL; }));
+}
 var STATE = { segments: [], cur: 0, duration: 0 };
 var EXPORT_FMT = "mp3";
 var actx = null;
@@ -289,15 +308,19 @@ document.querySelectorAll(".fmt-btn").forEach(function(btn) {
 
 document.getElementById("apiKey").value = API_KEY;
 document.getElementById("apiBase").value = API_BASE;
+document.getElementById("vlModel").value = VL_MODEL;
 
 document.getElementById("saveKeyBtn").onclick = function() {
   try {
     API_KEY = document.getElementById("apiKey").value.trim();
     API_BASE = document.getElementById("apiBase").value.trim();
+    VL_MODEL = document.getElementById("vlModel").value.trim();
     storeSet("dashscope_key", API_KEY);
     storeSet("dashscope_base", API_BASE);
+    storeSet("dashscope_vl_model", VL_MODEL);
+    vlModelOk = null; vlAllFailed = null;   // 换了配置要重新探测模型
     var msg = document.getElementById("apiMsg");
-    msg.textContent = "✅ 已保存（Key " + API_KEY.length + " 字符｜接口 " + (API_BASE || "官方") + "）" + (storeOk() ? "" : "　⚠️ 本环境禁止持久化，仅本次会话有效");
+    msg.textContent = "✅ 已保存（Key " + API_KEY.length + " 字符｜接口 " + (API_BASE || "官方") + "｜看图模型 " + (VL_MODEL || "自动") + "）" + (storeOk() ? "" : "　⚠️ 本环境禁止持久化，仅本次会话有效");
     msg.className = "api-msg ok";
   } catch(e) { alert("保存失败: "+e.message); }
 };
@@ -554,25 +577,43 @@ async function grabFrame(videoEl, timeSec) {
 
 async function aiMoodQuery(dataUrl, scriptText) {
   if (!API_KEY) throw new Error("请先填Key");
+  if (vlAllFailed) throw new Error(vlAllFailed);   // 整条链已探明不可用，别再逐段空试
   var prompt = "这是短剧某一段落的中间画面截图。\n剧本片段：\n" + scriptText.slice(0, 800) +
     "\n\n任务：根据画面主角表情、动作、氛围，用15-25个英文单词描述这段应配的BGM情绪风格。要求：1.贴主角内心情绪 2.纯器乐无人声 3.只输出英文一行";
-  var r = await apiFetch(apiUrl("/chat/completions"), {
-    method: "POST",
-    headers: { "Authorization": "Bearer " + API_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "qwen-vl-flash",
-      messages: [{ role: "user", content: [
-        { type: "image_url", image_url: { url: dataUrl } },
-        { type: "text", text: prompt }
-      ]}],
-      max_tokens: 120, temperature: 0.3
-    })
-  });
-  if (!r.ok) throw new Error("AI看图 " + await apiErr(r));
-  var j = await r.json();
-  var text = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
-  if (!text) throw new Error("AI返回空");
-  return text.replace(/[\n"'`*]/g, " ").slice(0, 300);
+  var list = vlModelOk ? [vlModelOk] : vlCandidates();
+  var tried = [], lastMsg = "";
+  for (var i=0; i<list.length; i++) {
+    var modelName = list[i];
+    var r = await apiFetch(apiUrl("/chat/completions"), {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: modelName,
+        messages: [{ role: "user", content: [
+          { type: "image_url", image_url: { url: dataUrl } },
+          { type: "text", text: prompt }
+        ]}],
+        max_tokens: 120, temperature: 0.3
+      })
+    });
+    if (r.ok) {
+      vlModelOk = modelName;                       // 命中后本次会话固定用它
+      var j = await r.json();
+      var text = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
+      if (!text) throw new Error("AI看图返回空（" + modelName + "）");
+      return text.replace(/[\n"'`*]/g, " ").slice(0, 300);
+    }
+    lastMsg = await apiErr(r);
+    tried.push(modelName + "→" + r.status);
+    // 只有「模型不存在／无权限／参数不支持」才值得换下一个；
+    // 鉴权失败、欠费、限流等换模型也没用，直接抛出真实原因。
+    if (!/model_not_found|does not exist|not have access|InvalidParameter|unsupported/i.test(lastMsg)) {
+      throw new Error("AI看图 " + lastMsg);
+    }
+  }
+  vlAllFailed = "AI看图候选模型全部不可用（" + tried.join("，") + "）。最后一次：" + lastMsg +
+                "　→ 可在「👁 看图模型」里手动填你账号已开通的视觉理解模型名。";
+  throw new Error(vlAllFailed);
 }
 
 function parseTimepoints(str, totalDur) {
@@ -912,7 +953,7 @@ document.getElementById("analyzeBtn").onclick = async function() {
     renderSegList();
     renderDetail();
     st.textContent = "✅ 完成！" + total + "段 → 合并后" + STATE.segments.length + "段BGM，视频" + dur.toFixed(1) + "秒。" +
-      (aiErr ? "　⚠️ AI看图未生效（已用剧本规则兜底）：" + aiErr : "");
+      (aiErr ? "　⚠️ AI看图未生效（已用剧本规则兜底）：" + aiErr : "　👁 看图模型：" + (vlModelOk || "-"));
     setProgress(bar, 100, "完成");
     document.getElementById("exportAllBtn").disabled = false;
   } catch(e) {
