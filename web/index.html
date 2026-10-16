@@ -5,7 +5,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>BGM工作台 v4.0</title>
+<title>BGM工作台 v5.0</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
 <style>
@@ -83,14 +83,19 @@ input[type=range] { width: 100%; margin-top: 6px; }
 .src-tag.rule { background:#fef3c7; color:#92400e; }
 .src-tag.carry { background:#e0e7ff; color:#4338ca; }
 .src-tag.def { background:#f1f5f9; color:#64748b; }
+/* 候选曲裁剪（每首各自独立） */
+.cut-box { margin-top:8px; padding:6px 8px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:5px; font-size:11px; color:#475569; }
+.cut-badge { display:inline-block; background:#ede9fe; color:#6d28d9; padding:0 4px; border-radius:3px; font-size:10px; }
+.mini-play { float:right; padding:0 6px; font-size:10px; background:#0ea5e9; border:none; color:#fff; border-radius:3px; cursor:pointer; }
+.mini-play:hover { background:#0284c7; }
 .fit-note { font-size:10px; color:#64748b; margin-top:2px; }
 @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
 <h1>🎬 BGM 工作台</h1>
-<div class="ver">版本 v4.0 · 镜头时长驱动配乐（逐镜头分段 + 换曲点吸附切点 + 四维选曲）</div>
-<div class="sub">选音乐库 → 上传视频+剧本 → 检测镜头 → 镜头时长+情绪共同决定乐段 → 导出MP3/WAV</div>
+<div class="ver">版本 v5.0 · 情绪以剧本为主 + 视频节奏控换曲 + 候选曲各自剪切</div>
+<div class="sub">选音乐库 → 上传视频+剧本 → 检测镜头 → <b>情绪以剧本为主</b>、视频节奏控换曲 → 点哪首剪哪首 → 导出MP3/WAV</div>
 
 <div id="globalErr"></div>
 <div id="readyBar">⏳ 正在初始化...</div>
@@ -145,7 +150,7 @@ input[type=range] { width: 100%; margin-top: 6px; }
       <label>🎯 BGM分段时间点:</label>
       <input type="text" id="timepoints" placeholder="示例: 0-22.5, 22.5-108">
     </div>
-    <button id="analyzeBtn" disabled>🔍 AI看图分析情绪 + 自动选曲</button>
+    <button id="analyzeBtn" disabled>🔍 剧本情绪分析 + 自动选曲（画面补充）</button>
     <div class="fmt-row">
       <label>导出格式:</label>
       <div class="fmt-btns">
@@ -879,7 +884,7 @@ document.getElementById("detectBtn").onclick = async function () {
     document.getElementById("mergeInfo").textContent =
       "镜头 " + SHOTS.length + " 个 ｜ ASL 平均镜头时长 " + asl.toFixed(2) + "s ｜ 切点 " + cpm.toFixed(1) + " 次/分 ｜ 快镜头(<2s) " + short + " 个 ｜ 长镜头(≥6s) " + longS + " 个";
     renderTimeline();
-    document.getElementById("status").textContent = "✅ 检测到 " + SHOTS.length + " 个镜头（已保留下方全部镜头，含快切）。点【AI看图分析情绪 + 自动选曲】开始配乐。";
+    document.getElementById("status").textContent = "✅ 检测到 " + SHOTS.length + " 个镜头（已保留下方全部镜头，含快切）。点【剧本情绪分析 + 自动选曲】开始配乐。";
     btn.textContent = "🎬 重新检测"; btn.disabled = false;
     setProgress(bar, 100, "完成");
   } catch (e) {
@@ -1077,20 +1082,33 @@ function segInsideCost(shots, j, i) {
 }
 // 段过长惩罚：一条 BGM 铺满整支视频 = 浪费换曲机会，听感也单调。
 // 实测（第 48 集）：剧本只有一场戏 → 情绪全同档 → 段内不纯恒 0 → 90.8s 整片只配 1 首。
-// 超过 45s 后代价线性增长（60s 封顶 0.7），DP 会自动在 cutability 最高的切点
-// （通常是长镜头边界）把曲子换掉 —— 边界位置仍由镜头节奏决定，而不是硬凑段数。
-function longPenalty(d) {
-  if (d <= 45) return 0;
-  return Math.min(0.7, (d - 45) / 60);
+// 阈值不再写死 45s，而是**由视频自己的节奏推出来**（用户口径：视频负责把控节奏）：
+// ASL 小 = 快剪，画面本身在催节奏 ⇒ 乐段上限压到 25s，换曲更勤；
+// ASL 大 = 长镜头慢片 ⇒ 放宽到 60s，一首铺久一点不突兀。
+function idealMaxSeg(shots) {
+  var n = shots.length;
+  if (!n) return 45;
+  var tot = 0, eng = 0;
+  for (var i = 0; i < n; i++) { tot += shots[i].dur || 0; eng += (shots[i].eng || 0); }
+  var asl = tot / n;
+  var engAvg = eng / n;                     // 剧本文本密度（能量）高 → 同样压短
+  var base = asl * 15;                      // ASL 2s → 30s；4s → 60s
+  base *= (1 - 0.25 * Math.min(1, Math.max(0, engAvg)));   // 高能量最多再收紧 25%
+  return Math.max(25, Math.min(60, base));
+}
+function longPenalty(d, idealMax) {
+  var mx = idealMax || 45;
+  if (d <= mx) return 0;
+  return Math.min(0.7, (d - mx) / (mx * 1.3));
 }
 // 单个候选乐段 [j, i) 的代价
-function segCost(shots, j, i, pre, minSeg) {
+function segCost(shots, j, i, pre, minSeg, idealMax) {
   var dur = pre[i] - pre[j];
   var c1 = L_INSIDE * segInsideCost(shots, j, i);                   // 段内情绪要纯
   var c2 = (j > 0) ? L_CUT * (1 - cutability(shots, j)) : 0;         // 边界要好换曲
   var c3 = L_LEN * durPenalty(dur);                                  // 段长要配得到曲
   var c4 = (dur < minSeg) ? L_SHORT * ((minSeg - dur) / minSeg) : 0;  // 太短重罚
-  var c5 = L_LONG * longPenalty(dur);                                // 太长该换曲了
+  var c5 = L_LONG * longPenalty(dur, idealMax);                      // 太长该换曲了
   return c1 + c2 + c3 + c4 + c5;
 }
 // DP：f[k][i] = 前 i 个镜头切成 k 段的最小代价；返回 [{a,b}]（镜头下标区间）
@@ -1099,9 +1117,13 @@ function dpSegments(shots, opt) {
   var n = shots.length;
   if (!n) return [];
   var maxSegs = Math.max(1, Math.min(opt.maxSegs || MAX_SEGS, n));
-  var minSeg = opt.minSeg || MIN_SEG;
   var pre = [0];
   for (var i = 0; i < n; i++) pre.push(pre[i] + shots[i].dur);
+  var asl = pre[n] / n;
+  // 最短乐段同样跟着视频节奏走：快剪片允许更短的乐段（4s 起），慢片保持 MIN_SEG。
+  // 显式传入 opt.minSeg 时以调用方为准（测试与手填覆盖要用固定值）。
+  var minSeg = (opt.minSeg != null) ? opt.minSeg : Math.max(4, Math.min(MIN_SEG, asl * 2.5));
+  var idealMax = (opt.idealMax != null) ? opt.idealMax : idealMaxSeg(shots);
   var INF = 1e9;
   var f = [], back = [];
   f[0] = new Array(n + 1).fill(INF); f[0][0] = 0; back[0] = new Array(n + 1).fill(-1);
@@ -1110,7 +1132,7 @@ function dpSegments(shots, opt) {
     for (var i2 = k; i2 <= n; i2++) {
       for (var j = k - 1; j < i2; j++) {
         if (f[k - 1][j] >= INF) continue;
-        var v = f[k - 1][j] + segCost(shots, j, i2, pre, minSeg);
+        var v = f[k - 1][j] + segCost(shots, j, i2, pre, minSeg, idealMax);
         if (v < f[k][i2]) { f[k][i2] = v; back[k][i2] = j; }
       }
     }
@@ -1205,19 +1227,43 @@ function pickTracks(qv, seg, usedSongs, limit) {
   res.sort(function (a, b) { return b.score - a.score; });
   return res.slice(0, limit || 10);
 }
-// 段的代表情绪（按时长加权取多数）与代表来源（AI > 规则 > 延续 > 默认）
-function mainMood(grp) {
-  var w = {}, best = "", bv = -1;
+// 情绪来源优先级：**剧本（规则层）为主，画面（AI 看图）只做补充**。
+// 这是用户明确要求的口径：「情绪弧线以剧本为主，视频负责把控节奏」。
+// 理由：单帧画面只能反映"此刻镜头里有什么"，而情绪弧线是剧情概念 ——
+// 一个笑容可能是苦笑（悲情），一记耳光可能配的是爽感（胜利），画面看不出来，剧本写着。
+// 所以：剧本能判出情绪档（score>0）→ 一律用剧本的 query；
+//       剧本这一场没有任何情绪线索 → 才用画面描述；
+//       都没有 → 交给 M7 降级链（延续上一镜头 / 默认中性）。
+function chooseMoodQuery(sh) {
+  var ruleQ = (sh.ruleScore > 0 && sh.ruleMood) ? (MOOD_QUERY[sh.ruleMood] || "") : "";
+  if (ruleQ) return { q: ruleQ, source: "剧本", mood: sh.ruleMood };
+  if (sh.aiQuery) return { q: sh.aiQuery, source: "画面", mood: sh.ruleMood || "画面判断" };
+  return { q: "", source: "", mood: "" };
+}
+// 统计当前镜头序列里各情绪来源各占多少（状态栏用）
+function srcCount(src) {
+  var n = 0;
+  for (var i = 0; i < SHOTS.length; i++) if (SHOTS[i].source === src) n++;
+  return n;
+}
+// 段的代表情绪（按时长加权取多数）
+function mainMood(grp) {  var w = {}, best = "", bv = -1;
   grp.forEach(function (s) { w[s.mood] = (w[s.mood] || 0) + s.dur; });
   for (var m in w) if (w[m] > bv) { bv = w[m]; best = m; }
   return best || "日常";
 }
+// 段的代表来源：剧本 > 画面 > 延续 > 默认（剧本优先，与单镜头口径一致）
 function mainSource(grp) {
-  var order = { "AI": 3, "规则": 2, "延续": 1, "默认": 0 }, best = "默认", bv = -1;
+  var order = { "剧本": 3, "规则": 3, "画面": 2, "AI": 2, "延续": 1, "默认": 0 }, best = "默认", bv = -1;
   grp.forEach(function (s) { var v = order[s.source]; if (v != null && v > bv) { bv = v; best = s.source; } });
   return best;
 }
-function srcTagCls(src) { return src === "AI" ? "ai" : src === "规则" ? "rule" : src === "延续" ? "carry" : "def"; }
+function srcTagCls(src) {
+  if (src === "剧本" || src === "规则") return "rule";
+  if (src === "画面" || src === "AI") return "ai";
+  if (src === "延续") return "carry";
+  return "def";
+}
 
 // ===================== 时间轴可视化 =====================
 function renderTimeline() {
@@ -1286,8 +1332,7 @@ async function renderDetail() {
   var cand = (s.candidates && s.candidates[s.track]) ? s.candidates[s.track] : null;
   if (!cand) { el.innerHTML = '<div style="color:#999;font-size:12px;">该段无候选曲</div>'; return; }
   var tags = [];
-  if (s.source === "AI") tags.push('<span class="src-tag ai">AI看图</span>');
-  else tags.push('<span class="src-tag '+srcTagCls(s.source)+'">'+esc(s.source||"规则")+'</span>');
+  tags.push('<span class="src-tag '+srcTagCls(s.source)+'">情绪来源：'+esc(s.source||"剧本")+'</span>');
   tags.push('<span class="src-tag">'+s.shotCount+'镜头</span>');
   var fitOf = function (c) {
     if (!c) return "";
@@ -1296,78 +1341,120 @@ async function renderDetail() {
       " ｜ 时长适配 " + (c.fDur != null ? c.fDur.toFixed(2) : "-") +
       " ｜ BPM适配 " + (c.fBpm != null ? c.fBpm.toFixed(2) : "-");
   };
+  var cut = candCut(cand, s);
   el.innerHTML = "<b>段 "+esc(s.id)+"</b> <span class='mood'>"+esc(s.mood)+"</span> "+tags.join("")+
     "<br><span style='color:#666;font-size:11px;'>"+(s.timeStart||0).toFixed(1)+"s - "+(s.timeEnd||0).toFixed(1)+"s"+
     "（"+(s.timeEnd-s.timeStart).toFixed(1)+"s / ASL "+s.asl.toFixed(2)+"s / 目标 "+Math.round(s.wantBpm)+"BPM / 能量 "+s.eng.toFixed(2)+"）</span>"+
     "<div class='query-box'>🔍 "+esc(s.query||"")+"</div>"+
-    "<div class='song sel'>"+esc(cand.fn)+"</div>"+
+    "<div class='song sel'>现在用的是：["+s.track+"] "+esc(cand.fn)+"</div>"+
     "<div class='fit-note'>"+fitOf(cand)+" ｜ 情绪余弦 "+(cand.sim||0).toFixed(3)+"</div>"+
-    "<div style='margin-top:8px;'>"+
-    "<label style='font-size:12px;'>起始: <input type='number' id='st' value='"+(s.srcStart||2).toFixed(1)+"' step='0.5' style='width:70px;'>s</label> "+
-    "<label style='font-size:12px;'>时长: <input type='number' id='dur' value='"+(s.srcDur||30).toFixed(1)+"' step='0.5' style='width:70px;'>s</label>"+
-    "</div><div id='cands' style='margin-top:8px;'></div>"+
-    "<button id='previewBtn'>▶ 播放</button>"+
+    "<div class='cut-box'><b>✂ 剪这一首</b>（只作用于当前选中的这首，其它候选各记各的）<br>"+
+    "<label style='font-size:12px;'>起点: <input type='number' id='st' value='"+cut.start.toFixed(1)+"' step='0.5' min='0' style='width:70px;'>s</label> "+
+    "<label style='font-size:12px;'>时长: <input type='number' id='dur' value='"+cut.dur.toFixed(1)+"' step='0.5' min='0.5' style='width:70px;'>s</label> "+
+    "<button id='resetCutBtn' class='secondary' style='padding:2px 8px;font-size:11px;'>重置本曲</button>"+
+    "<span id='cutNote' style='font-size:10px;color:#888;'>"+(cut.manual ? "已手动裁剪" : "默认（起点 2s / 时长 = 乐段时长）")+"</span>"+
+    "</div>"+
+    "<div id='cands' style='margin-top:8px;'></div>"+
+    "<button id='previewBtn'>▶ 播放选中曲</button>"+
     "<button id='pauseBtn' class='secondary'>⏸ 停止</button>"+
     "<span id='loadHint' class='loading-hint'></span>"+
     "<div class='player'><input type='range' id='seekBar' min='0' max='100' value='0'>"+
     "<div class='time'><span id='curTime'>0:00</span><span id='durTime'>0:00</span></div></div>";
   var cands = document.getElementById("cands");
   (s.candidates||[]).forEach(function(c, i) {
+    var cc = candCut(c, s);
     var d = document.createElement("div");
     d.className = "song" + (i===s.track?" sel":"");
     d.innerHTML = "["+i+"] " + esc(c.fn.slice(0,34)) + " <span style='color:#888;font-size:10px;'>" +
       (c.dur ? c.dur.toFixed(0)+"s" : "?") + " / " + (c.bpm ? Math.round(c.bpm)+"bpm" : "?") +
-      " / " + (c.score != null ? c.score.toFixed(3) : (c.sim||0).toFixed(3)) + "</span>";
-    d.onclick = function() { s.track = i; stopPreview(); renderDetail(); };
+      " / " + (c.score != null ? c.score.toFixed(3) : (c.sim||0).toFixed(3)) + "</span>" +
+      " <span class='cut-badge' id='cutbadge-"+i+"'"+(cc.manual?"":" style='display:none'")+">✂ "+cc.start.toFixed(0)+"s+"+cc.dur.toFixed(0)+"s</span>" +
+      " <button class='mini-play' title='试听这一首（用它的裁剪）'>▶</button>";
+    d.onclick = function(e) {
+      if (e && e.target && e.target.className === "mini-play") { playCandidate(s, i); return; }
+      s.track = i; stopPreview(); renderDetail();
+    };
     cands.appendChild(d);
   });
-  document.getElementById("pauseBtn").onclick = function() { stopPreview(); };
-  document.getElementById("previewBtn").onclick = async function() {
-    var btn = this;
-    var hint = document.getElementById("loadHint");
-    // 顺序很重要：stopPreview() 内部会自增 previewToken。
-    // 必须先 stopPreview() 再取号，否则 myToken 永远比 previewToken 小 1，
-    // 下面每一处 `myToken !== previewToken` 守卫都会立刻 return ——
-    // 表现为：解码其实已经成功，但既不播放、也不清除「解码中...」，按钮永久禁用。
-    stopPreview();
-    var myToken = ++previewToken;
-    btn.disabled = true; btn.textContent = "⏳ 加载...";
-    hint.textContent = "解码中...";
-    try {
-      s.srcStart = parseFloat(document.getElementById("st").value) || 2;
-      s.srcDur = parseFloat(document.getElementById("dur").value) || 30;
-      var fh = SONG_MAP[cand.fn.toLowerCase()];
-      if (!fh) throw new Error("找不到："+cand.fn);
-      var buf = await decodeAudioFile(fh);
-      if (myToken !== previewToken) return;
-      var ctx = getCtx();
-      var off = Math.max(0, s.srcStart);
-      var dur = Math.min(s.srcDur, Math.max(0.1, buf.duration - off));
-      if (dur <= 0.1) throw new Error("素材太短");
-      var src = ctx.createBufferSource(); src.buffer = buf;
-      var gain = ctx.createGain();
-      src.connect(gain); gain.connect(ctx.destination);
-      src.start(0, off, dur);
-      curPreviewSource = src; curPreviewGain = gain;
-      var bar = document.getElementById("seekBar");
-      document.getElementById("durTime").textContent = fmt(dur);
-      var t0 = ctx.currentTime;
-      btn.textContent = "🔄 播放中"; hint.textContent = "";
-      playTimer = setInterval(function() {
-        if (myToken !== previewToken) { clearInterval(playTimer); return; }
-        var t = ctx.currentTime - t0;
-        bar.value = Math.min(100, (t/dur)*100);
-        document.getElementById("curTime").textContent = fmt(t);
-        if (t >= dur) stopPreview();
-      }, 100);
-      src.onended = function() { if (myToken === previewToken) stopPreview(); };
-    } catch(e) {
-      if (myToken === previewToken) { alert("解码失败："+e.message); hint.textContent = ""; }
-    } finally {
-      if (myToken === previewToken) { btn.disabled = false; btn.textContent = "▶ 播放"; }
+  document.getElementById("resetCutBtn").onclick = function() {
+    delete cand.srcStart; delete cand.srcDur;
+    stopPreview(); renderDetail();
+  };
+  // 输入框改动即时写入**当前这一首**的裁剪（不必先点播放才生效）
+  var writeCut = function() {
+    var sv = parseFloat(document.getElementById("st").value);
+    var dv = parseFloat(document.getElementById("dur").value);
+    if (isFinite(sv) && sv >= 0) cand.srcStart = sv;
+    if (isFinite(dv) && dv > 0) cand.srcDur = dv;
+    var note = document.getElementById("cutNote");
+    if (note) note.textContent = "已手动裁剪（本曲）";
+    // 就地更新候选行上的 ✂ 徽标 —— 不重渲染，否则会抢走输入框焦点
+    var badge = document.getElementById("cutbadge-" + s.track);
+    if (badge) {
+      var c0 = candCut(cand, s);
+      badge.textContent = "✂ " + c0.start.toFixed(0) + "s+" + c0.dur.toFixed(0) + "s";
+      badge.style.display = "";
     }
   };
+  document.getElementById("st").oninput = writeCut;
+  document.getElementById("dur").oninput = writeCut;
+  document.getElementById("pauseBtn").onclick = function() { stopPreview(); };
+  document.getElementById("previewBtn").onclick = function() { playCandidate(s, s.track); };
 };
+// 播放第 i 个候选：用**它自己的裁剪**参数（起点/时长），与其它候选互不影响。
+async function playCandidate(s, i) {
+  // 点了别的候选曲：先切过去（renderDetail 会重建面板），再走正常播放流程
+  if (i !== s.track) {
+    stopPreview();
+    s.track = i;
+    renderDetail();
+  }
+  var btn = document.getElementById("previewBtn");
+  var hint = document.getElementById("loadHint");
+  // 顺序很重要：stopPreview() 内部会自增 previewToken。
+  // 必须先 stopPreview() 再取号，否则 myToken 永远比 previewToken 小 1，
+  // 下面每一处 `myToken !== previewToken` 守卫都会立刻 return ——
+  // 表现为：解码其实已经成功，但既不播放、也不清除「解码中...」，按钮永久禁用。
+  stopPreview();
+  var myToken = ++previewToken;
+  if (btn) { btn.disabled = true; btn.textContent = "⏳ 加载..."; }
+  if (hint) hint.textContent = "解码中...";
+  try {
+    var cand = s.candidates[i];
+    if (!cand) throw new Error("没有这一首");
+    var cut = candCut(cand, s);
+    var fh = SONG_MAP[cand.fn.toLowerCase()];
+    if (!fh) throw new Error("找不到："+cand.fn);
+    var buf = await decodeAudioFile(fh);
+    if (myToken !== previewToken) return;
+    var ctx = getCtx();
+    var off = Math.max(0, cut.start);
+    var dur = Math.min(cut.dur, Math.max(0.1, buf.duration - off));
+    if (dur <= 0.1) throw new Error("素材太短");
+    var src = ctx.createBufferSource(); src.buffer = buf;
+    var gain = ctx.createGain();
+    src.connect(gain); gain.connect(ctx.destination);
+    src.start(0, off, dur);
+    curPreviewSource = src; curPreviewGain = gain;
+    var bar = document.getElementById("seekBar");
+    document.getElementById("durTime").textContent = fmt(dur);
+    var t0 = ctx.currentTime;
+    if (btn) btn.textContent = "🔄 播放中";
+    if (hint) hint.textContent = "";
+    playTimer = setInterval(function() {
+      if (myToken !== previewToken) { clearInterval(playTimer); return; }
+      var t = ctx.currentTime - t0;
+      bar.value = Math.min(100, (t/dur)*100);
+      document.getElementById("curTime").textContent = fmt(t);
+      if (t >= dur) stopPreview();
+    }, 100);
+    src.onended = function() { if (myToken === previewToken) stopPreview(); };
+  } catch(e) {
+    if (myToken === previewToken) { alert("解码失败："+e.message); if (hint) hint.textContent = ""; }
+  } finally {
+    if (myToken === previewToken && btn) { btn.disabled = false; btn.textContent = "▶ 播放选中曲"; }
+  }
+}
 
 // 确保有一个可用的隐藏 <video> 供抽帧（grabFrame 需要 videoWidth）
 async function ensureAnalyzeVideo(vf) {
@@ -1464,12 +1551,14 @@ document.getElementById("analyzeBtn").onclick = async function () {
     }
 
     // ---------- 5. 情绪 query 去重后批量嵌入（≈14 条，而非每镜头一条）----------
+    // 口径：剧本为主、画面补充（见 chooseMoodQuery）。AI 看图只填剧本判不出的那些镜头。
     var qSet = {};
     SHOTS.forEach(function (sh) {
-      var q = sh.aiQuery || (sh.ruleScore > 0 ? (MOOD_QUERY[sh.ruleMood] || "") : "");
-      sh.qKey = q;
-      sh.source = q ? (sh.aiQuery ? "AI" : "规则") : "";
-      if (q) qSet[q] = 1;
+      var pick = chooseMoodQuery(sh);
+      sh.qKey = pick.q;
+      sh.source = pick.source;
+      sh.pickMood = pick.mood;
+      if (pick.q) qSet[pick.q] = 1;
     });
     var uniqQ = Object.keys(qSet);
     var DEF_Q = MOOD_QUERY["日常"];
@@ -1486,7 +1575,7 @@ document.getElementById("analyzeBtn").onclick = async function () {
       if (sh.qKey && qMap[sh.qKey]) {
         sh.moodVec = normF32(qMap[sh.qKey]);
         sh.query = sh.qKey;
-        sh.mood = sh.ruleMood || (sh.aiQuery ? "AI判断" : "日常");
+        sh.mood = sh.pickMood || "日常";
       }
     });
     // M7 降级链：无 AI 无规则 → 沿用上一镜头情绪 → 全无则默认中性铺底
@@ -1502,7 +1591,7 @@ document.getElementById("analyzeBtn").onclick = async function () {
     setProgress(bar, 62, "乐段聚合（DP）...");
     await yieldUI();
     var ranges = userTP ? userTpToShotRanges(userTP, SHOTS) : null;
-    if (!ranges) ranges = dpSegments(SHOTS, { maxSegs: MAX_SEGS, minSeg: MIN_SEG });
+    if (!ranges) ranges = dpSegments(SHOTS, { maxSegs: MAX_SEGS });   // minSeg/乐段上限由视频节奏自适应
     if (!ranges || !ranges.length) throw new Error("分段失败（镜头数不足？）");
 
     // ---------- 7. M5 四维打分选曲 ----------
@@ -1529,7 +1618,8 @@ document.getElementById("analyzeBtn").onclick = async function () {
         mood: mainMood(grp), source: mainSource(grp),
         query: grp.map(function (s) { return s.query; }).filter(function (q, i2, arr) { return q && arr.indexOf(q) === i2; }).join(" / "),
         shotIdx: grp.map(function (s) { return s.i; }),
-        candidates: [], track: 0, srcStart: 2, srcDur: sdur
+        // 裁剪参数不在这里 —— 它挂在**候选曲**上（见 candCut），点哪首剪哪首。
+        candidates: [], track: 0
       };
       setProgress(bar, 72 + Math.round((gi / ranges.length) * 20), "选曲 " + (gi + 1) + "/" + ranges.length);
       await yieldUI();
@@ -1547,13 +1637,17 @@ document.getElementById("analyzeBtn").onclick = async function () {
       STATE.segments.forEach(function (s) { var c = s.candidates[s.track]; if (c && c.dur) { n++; if (c.dur >= s.dur) ok++; } });
       return n ? ("选中曲目时长 ≥ 乐段时长 的比例：" + Math.round(ok / n * 100) + "%（" + ok + "/" + n + "）") : "";
     })();
+    var idealMax = idealMaxSeg(SHOTS);
     st.textContent =
       "✅ 完成！" + SHOTS.length + " 个镜头 → " + STATE.segments.length + " 个乐段，视频 " + T.toFixed(1) + "s" +
-      "\n镜头节奏：ASL " + aslAll.toFixed(2) + "s ｜ 切点 " + (60 / Math.max(0.01, aslAll)).toFixed(1) + " 次/分" +
+      "\n情绪口径：**以剧本为主**（剧本判不出情绪档的镜头才用 AI 看图补充）｜剧本 " + srcCount("剧本") + " 镜头 / 画面 " + srcCount("画面") + " / 延续 " + srcCount("延续") + " / 默认 " + srcCount("默认") +
+      "\n视频节奏：ASL " + aslAll.toFixed(2) + "s ｜ 切点 " + (60 / Math.max(0.01, aslAll)).toFixed(1) + " 次/分" +
+      " ｜ 乐段上限 " + Math.round(idealMax) + "s（越快剪换曲越勤）" +
       "\n分段方式：" + (userTP ? "你手填的时间点（已吸附到镜头切点）" : "DP 最优分段（边界全在镜头切点上）") +
       "\n选曲权重：情绪 0.45 / 时长 0.25 / BPM 0.20 / 能量 0.10" + (avgFit ? "\n" + avgFit : "") +
-      (aiOk ? "\n👁 AI看图 " + aiOk + " 个关键镜头（并发" + VLM_CONCURRENCY + "）｜模型 " + (vlModelOk || "-") + "｜其余 " + (SHOTS.length - aiOk) + " 个走剧本规则" : "") +
-      (aiErr ? "\n⚠️ AI看图未生效（已用剧本规则兜底）：" + aiErr : "");
+      "\n✂ 右侧详情面板：点哪首候选曲就剪哪首（起点/时长各记各的），▶ 单独试听" +
+      (aiOk ? "\n👁 AI看图 " + aiOk + " 个关键镜头（并发" + VLM_CONCURRENCY + "，仅用于剧本无线索处）｜模型 " + (vlModelOk || "-") : "") +
+      (aiErr ? "\n⚠️ AI看图未生效（不影响剧本情绪）：" + aiErr : "");
     setProgress(bar, 100, "完成");
     document.getElementById("exportAllBtn").disabled = false;
   } catch (e) {
@@ -1657,15 +1751,39 @@ async function mixAtCuts(bufs, starts, FEs, totalDur) {
   return out;
 }
 
+// ===== 候选曲的裁剪（每首各自记住自己的起点/时长）=====
+// 用户要求：「右边 ④ 详情面板，点哪首音乐就剪哪首」。所以裁剪参数挂在**候选曲**上，
+// 不是挂在乐段上 —— 同一段里 [0] 剪 20s、[3] 剪 35s 互不干扰；换回 [0] 还是原来那份。
+// 未手动设置过的候选：起点默认 2s（避开很多素材开头的空白/淡入），时长默认 = 乐段时长。
+function candCut(c, seg) {
+  var defDur = seg ? Math.max(0.5, (seg.timeEnd - seg.timeStart) || seg.dur || 30) : 30;
+  return {
+    start: (c && c.srcStart != null) ? c.srcStart : 2,
+    dur: (c && c.srcDur != null) ? c.srcDur : defDur,
+    manual: !!(c && (c.srcStart != null || c.srcDur != null))
+  };
+}
+function segCut(seg) { return candCut(seg.candidates[seg.track], seg); }
+// 取素材时的候选次序：**当前选中的那首排第一**，其余按打分顺序跟上。
+// 旧版永远从 candidates[0] 开始取 —— 用户点了第 3 首，导出用的还是第 1 首。
+function buildOrder(seg) {
+  var sel = seg.candidates[seg.track], out = [];
+  if (sel) out.push(sel);
+  for (var i = 0; i < seg.candidates.length; i++) if (seg.candidates[i] !== sel) out.push(seg.candidates[i]);
+  return out;
+}
+
 // 唯一的渲染入口：导出（exportAllBtn）与自检脚本都调它，保证测的就是跑的。
 // 乐段 i 占 [A_i, A_i+D_i]，A_i = 前面所有 D 的累加（首段从 0 起）。
 async function renderBGM(segs, totalDur, onProgress) {
   var ctx = getCtx();
-  var Ds = [], starts = [], acc = 0;
+  var Ds = [], starts = [], acc = 0, cuts = [];
   for (var i = 0; i < segs.length; i++) {
-    var D = parseFloat(segs[i].srcDur);
+    var cut = segCut(segs[i]);              // 用**当前选中候选曲**自己的裁剪
+    var D = parseFloat(cut.dur);
     if (!(D > 0)) D = (segs[i].timeEnd - segs[i].timeStart) || 10;
     D = Math.max(0.5, D);
+    cuts.push(cut);
     starts.push(acc); Ds.push(D); acc += D;
   }
   // M6：每个切点各自的交叉宽度 = 两侧段长的函数（1.5~4s）
@@ -1677,7 +1795,7 @@ async function renderBGM(segs, totalDur, onProgress) {
     var tail = (i2 < segs.length - 1 ? FEs[i2 + 1] / 2 : 0);
     onProgress && onProgress(i2, segs.length);
     var want = Ds[i2] + head + tail;
-    var sb = await buildSegmentBuffer(segs[i2], want, Math.max(0, (segs[i2].srcStart || 0) - head));
+    var sb = await buildSegmentBuffer(segs[i2], want, Math.max(0, cuts[i2].start - head));
     if (!sb || sb.length < 100) sb = ctx.createBuffer(1, Math.max(1, Math.floor(want * ctx.sampleRate)), ctx.sampleRate);
     sb = alignToDuration(sb, want);
     segLens.push(+sb.duration.toFixed(2));
@@ -1698,19 +1816,20 @@ async function renderBGM(segs, totalDur, onProgress) {
 
 async function buildSegmentBuffer(seg, neededDur, fromStart) {
   var pieces = []; var filled = 0; var used = new Set();
-  var off = (fromStart == null) ? (seg.srcStart || 0) : fromStart;
-  for (var i=0; i<seg.candidates.length && filled < neededDur - 0.01; i++) {
-    var c = seg.candidates[i];
+  var selCut = segCut(seg);
+  var off = (fromStart == null) ? (selCut.start || 0) : fromStart;
+  var order = buildOrder(seg);        // 选中的那首优先，其余按分数兜底
+  for (var i=0; i<order.length && filled < neededDur - 0.01; i++) {
+    var c = order[i];
     if (used.has(c.fn)) continue;
     var fh = SONG_MAP[c.fn.toLowerCase()];
     if (!fh) continue;
     try {
       var full = await decodeAudioFile(fh);
       var remain = neededDur - filled;
-      // 只取 remain 秒。调用方传入的 neededDur 已经含交叉淡入余量，
-      // 旧版在这里再加一次 CROSSFADE_SEC，会让每段素材长 4 秒（20s 段变 28s），
-      // 拼接时被"吃掉"看似无碍，实则放大位移。
-      var piece = sliceBuffer(full, off, remain);
+      // 换到兜底曲时，用兜底曲自己的裁剪起点（用户可能也剪过它），没有就用默认 2s
+      var useOff = (i === 0) ? off : Math.max(0, candCut(c, seg).start);
+      var piece = sliceBuffer(full, useOff, remain);
       pieces.push(piece); filled += piece.duration; used.add(c.fn);
     } catch(e) { console.warn("decode fail", c.fn, e); }
     await yieldUI();

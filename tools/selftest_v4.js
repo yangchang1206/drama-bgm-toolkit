@@ -337,6 +337,83 @@ section("T10 单场戏整片同情绪时，不能整片只配一首");
   ok("对照组：节奏均匀+同情绪 → 少量段（≤3）", ru.length <= 3, "段数 " + ru.length);
 }
 
+// ================= T11 剧本为主 / 视频控节奏 / 候选曲各自裁剪 =================
+section("T11 情绪以剧本为主，视频把控节奏，候选曲各自裁剪");
+{
+  // --- T11.1 情绪来源优先级：剧本 > 画面 > 延续 > 默认 ---
+  const p1 = G.chooseMoodQuery({ ruleScore: 2, ruleMood: "悲情压抑", aiQuery: "bright colorful joyful scene" });
+  ok("剧本能判出情绪 → 用剧本 query（画面描述被忽略）",
+     p1.source === "剧本" && p1.q === G.MOOD_QUERY["悲情压抑"], JSON.stringify(p1).slice(0, 70));
+  const p2 = G.chooseMoodQuery({ ruleScore: 0, ruleMood: "", aiQuery: "warm sunlight on faces" });
+  ok("剧本无情绪线索 → 才用画面描述", p2.source === "画面" && p2.q === "warm sunlight on faces");
+  const p3 = G.chooseMoodQuery({ ruleScore: 0, aiQuery: "" });
+  ok("两者都无 → 交给降级链（q 为空）", p3.q === "" && p3.source === "");
+  ok("段代表来源 剧本 > 画面", G.mainSource([{ source: "画面", dur: 9 }, { source: "剧本", dur: 1 }]) === "剧本");
+  ok("段代表来源 画面 > 延续", G.mainSource([{ source: "延续", dur: 9 }, { source: "画面", dur: 1 }]) === "画面");
+  ok("来源配色：剧本=rule(琥珀)/画面=ai(绿)/延续=carry",
+     G.srcTagCls("剧本") === "rule" && G.srcTagCls("画面") === "ai" && G.srcTagCls("延续") === "carry");
+
+  // --- T11.2 视频节奏 → 乐段长度上限 ---
+  const mk2 = (n, d) => Array.from({ length: n }, (_, i) => ({ i, t0: i * d, t1: i * d + d, dur: d, mood: "A", moodVec: new Float32Array([1, 0, 0]) }));
+  const fast = G.idealMaxSeg(mk2(60, 1.5)), slow = G.idealMaxSeg(mk2(20, 6));
+  ok("快剪 ASL1.5 → 乐段上限 ≤ 30s", fast <= 30 + 1e-9, fast.toFixed(1) + "s");
+  ok("长镜头 ASL6 → 乐段上限 = 60s（封顶）", near(slow, 60, 1e-6), slow.toFixed(1) + "s");
+  ok("快剪上限 < 长镜头上限（视频决定换曲频率）", fast < slow);
+  ok("未超上限 → longPenalty = 0", G.longPenalty(30, 45) === 0);
+  ok("超上限 → 线性增长且封顶 0.7", G.longPenalty(90, 45) > 0 && G.longPenalty(100000, 45) <= 0.7 + 1e-9);
+
+  // --- T11.3 每首候选曲各自记自己的裁剪 ---
+  const seg = { timeStart: 0, timeEnd: 40, dur: 40, track: 1,
+                candidates: [{ fn: "a.mp3" }, { fn: "b.mp3" }, { fn: "c.mp3" }] };
+  const d1 = G.candCut(seg.candidates[1], seg);
+  ok("默认裁剪：起点 2s / 时长 = 乐段时长 40s", d1.start === 2 && d1.dur === 40, JSON.stringify(d1));
+  seg.candidates[1].srcStart = 12; seg.candidates[1].srcDur = 22;
+  const d2 = G.segCut(seg);
+  ok("写入的是第 2 首自己的裁剪", d2.start === 12 && d2.dur === 22 && d2.manual === true);
+  ok("第 1 首不受影响（各记各的）", G.candCut(seg.candidates[0], seg).start === 2);
+  const ord = G.buildOrder(seg);
+  ok("取素材次序：选中曲排第一", ord[0].fn === "b.mp3" && ord.length === 3, ord.map(o => o.fn).join(","));
+}
+
+// ================= T12 「点哪首剪哪首」端到端（真跑 buildSegmentBuffer + renderBGM）=================
+section("T12 选中的候选曲 + 它的裁剪，真的作用到导出（端到端）");
+{
+  const SR = 8000;
+  // 造素材：前 8 秒静音、之后满电平 —— 用它反查"从第几秒开始取"
+  const makeSrc = () => { const b = new FakeAudioBuffer(1, Math.round(60 * SR), SR); const d = b.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (i / SR < 8) ? 0 : 1; return b; };
+  G.SONG_MAP = { "a.mp3": { k: "a" }, "b.mp3": { k: "b" }, "c.mp3": { k: "c" }, "d.mp3": { k: "d" } };
+  G.decodeAudioFile = async () => makeSrc();
+  G.FE_MIN = 1.5; G.FE_MAX = 4.0;
+
+  const seg = { timeStart: 0, timeEnd: 30, dur: 30, track: 0,
+                candidates: [{ fn: "a.mp3" }, { fn: "b.mp3" }], shotCount: 5, wantBpm: 100, eng: 0.5 };
+  // 默认（起点 2s）→ 2s 处仍在静音区
+  let b0 = await G.buildSegmentBuffer(seg, 10, null);
+  ok("默认起点 2s → 素材前段是静音（证明确实从 2s 取）", b0.getChannelData(0)[Math.round(4 * SR)] === 0);
+  // 给第 2 首设 "从 12s 取"（12s 已在满电平区）
+  seg.candidates[1].srcStart = 12; seg.candidates[1].srcDur = 18;
+  seg.track = 0;
+  let b1 = await G.buildSegmentBuffer(seg, 10, null);
+  ok("仍选第 1 首 → 还从 2s 取（静音）", b1.getChannelData(0)[Math.round(4 * SR)] === 0);
+  seg.track = 1;   // 用户点了第 2 首
+  let b2 = await G.buildSegmentBuffer(seg, 10, null);
+  ok("点了第 2 首 → 素材从 12s 取（满电平）", b2.getChannelData(0)[Math.round(4 * SR)] === 1);
+
+  // renderBGM：段长应按**选中曲**的裁剪时长，而不是乐段原始时长
+  const segs = [
+    { timeStart: 0, timeEnd: 30, dur: 30, track: 0, candidates: [{ fn: "a.mp3" }, { fn: "b.mp3", srcStart: 12, srcDur: 18 }] },
+    { timeStart: 30, timeEnd: 60, dur: 30, track: 0, candidates: [{ fn: "c.mp3" }, { fn: "d.mp3" }] }
+  ];
+  let r = await G.renderBGM(segs, 60);
+  ok("第 1 段用默认裁剪 → 落点 0 起、第 2 段落点 30s", near(r.starts[0], 0, 1e-9) && near(r.starts[1], 30, 1e-9), JSON.stringify(r.starts));
+  segs[0].track = 1;   // 第 1 段改用第 2 首（剪到 18s）
+  r = await G.renderBGM(segs, 60);
+  ok("改用剪到 18s 的那首 → 第 2 段落点前移到 18s", near(r.starts[1], 18, 1e-9), JSON.stringify(r.starts));
+  ok("段素材长度 = 裁剪时长 18s + 交叉余量", near(r.segLens[0], 18 + r.FEs[1] / 2, 0.05), r.segLens[0] + "（FEs[1]=" + r.FEs[1].toFixed(1) + "）");
+  ok("输出总长仍 = 视频时长 60s", near(r.buf.duration, 60, 1e-3), r.buf.duration.toFixed(3));
+}
+
 // ================= 汇总 =================
 console.log("\n" + "=".repeat(52));
 console.log("通过 " + pass + " 项，失败 " + fail + " 项");
