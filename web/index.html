@@ -248,6 +248,7 @@ var L_INSIDE = 1.0;   // 段内情绪不纯
 var L_CUT    = 0.8;   // 边界换曲适宜度
 var L_LEN    = 0.35;  // 段长是否好配曲
 var L_SHORT  = 3.0;   // 段过短的惩罚
+var L_LONG   = 0.5;   // 段过长的惩罚（整片一首歌 = 浪费换曲机会）
 
 // M7 情绪 → 颜色（时间轴可视化）
 var MOOD_COLORS = {
@@ -1039,6 +1040,10 @@ function durPenalty(d) {
 // 用「1 − 主导情绪时长占比」而不是"相邻镜头对的平均相似度"：
 // 后者对 [A,A,A,B,B,B,C,C,C,C] 这种混合段给出 0.22（因为 7/9 的相邻对本来就同档），
 // 严重低估了"一段里塞了三种情绪"这件事，导致 DP 倾向不切。
+// 注意：**镜头节奏快慢不进这一项** —— 实测真实视频里快切/中速是细粒度交错的
+// （1.5s 与 3s 镜头来回穿插），不是"一块快切+一块长镜"的区域结构，
+// 按"主导节奏档占比"算每段都是 ~0.5，切几段都降不下去，只会淹没真正的换曲动机。
+// 节奏对换曲的影响由 cutability（边界好不好换）与 longPenalty（段太长该换）承担。
 function segInsideCost(shots, j, i) {
   var cnt = i - j;
   if (cnt <= 1) return 0;
@@ -1070,6 +1075,14 @@ function segInsideCost(shots, j, i) {
   for (var k4 = j; k4 < i; k4++) if (shots[k4].moodVec) s += cosArr(avg, shots[k4].moodVec);
   return 1 - s / n;
 }
+// 段过长惩罚：一条 BGM 铺满整支视频 = 浪费换曲机会，听感也单调。
+// 实测（第 48 集）：剧本只有一场戏 → 情绪全同档 → 段内不纯恒 0 → 90.8s 整片只配 1 首。
+// 超过 45s 后代价线性增长（60s 封顶 0.7），DP 会自动在 cutability 最高的切点
+// （通常是长镜头边界）把曲子换掉 —— 边界位置仍由镜头节奏决定，而不是硬凑段数。
+function longPenalty(d) {
+  if (d <= 45) return 0;
+  return Math.min(0.7, (d - 45) / 60);
+}
 // 单个候选乐段 [j, i) 的代价
 function segCost(shots, j, i, pre, minSeg) {
   var dur = pre[i] - pre[j];
@@ -1077,7 +1090,8 @@ function segCost(shots, j, i, pre, minSeg) {
   var c2 = (j > 0) ? L_CUT * (1 - cutability(shots, j)) : 0;         // 边界要好换曲
   var c3 = L_LEN * durPenalty(dur);                                  // 段长要配得到曲
   var c4 = (dur < minSeg) ? L_SHORT * ((minSeg - dur) / minSeg) : 0;  // 太短重罚
-  return c1 + c2 + c3 + c4;
+  var c5 = L_LONG * longPenalty(dur);                                // 太长该换曲了
+  return c1 + c2 + c3 + c4 + c5;
 }
 // DP：f[k][i] = 前 i 个镜头切成 k 段的最小代价；返回 [{a,b}]（镜头下标区间）
 function dpSegments(shots, opt) {

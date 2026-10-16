@@ -308,6 +308,35 @@ section("T9 索引元数据契约（前端读取路径）");
   }
 }
 
+// ================= T10 单场戏 + 整片同情绪（用户实测回归）=================
+section("T10 单场戏整片同情绪时，不能整片只配一首");
+{
+  // 用户实测：第 48 集 90.8s、剧本只有 48-1 一场 → 所有镜头情绪同档，
+  // 旧版 DP 的段内代价只看情绪 → 恒为 0 → 整片只配 1 首。
+  // 这里按截图构造 42 个镜头：开场长镜 + 多串快切 + 中速镜头交替。
+  const durs = [6.6, 1.2, 1.4, 1.8, 1.3, 2.2, 1.6, 1.1, 2.8, 1.5,
+                4.2, 1.4, 1.7, 2.1, 1.2, 3.4, 1.6, 1.3, 2.5, 1.8,
+                5.8, 1.5, 1.2, 2.0, 1.4, 2.6, 1.1, 1.9, 3.1, 1.5,
+                6.4, 1.3, 1.6, 2.2, 1.2, 2.9, 1.7, 1.4, 3.6, 2.1, 4.9, 2.6];
+  let t = 0;
+  const shots = durs.map((d, i) => { const s = { i, t0: t, t1: t + d, dur: d, mood: "温暖治愈", moodVec: new Float32Array([1, 0, 0]) }; t += d; return s; });
+  const total = t;
+  ok("构造的视频 ≈ 90s", total > 85 && total < 100, total.toFixed(1) + "s");
+  const ranges = G.dpSegments(shots, { maxSegs: G.MAX_SEGS, minSeg: G.MIN_SEG });
+  ok("段数 ≥ 2（节奏变化处应换曲）", ranges.length >= 2, "段数 " + ranges.length + " " + JSON.stringify(ranges.map(r => r.a + "-" + r.b)));
+  ok("段数 ≤ MAX_SEGS", ranges.length <= G.MAX_SEGS, "段数 " + ranges.length);
+  // 每段时长足够配上歌
+  const segDurs = ranges.map(r => shots.slice(r.a, r.b).reduce((a, s) => a + s.dur, 0));
+  ok("每段 ≥ 5s（太短配不到曲）", segDurs.every(d => d >= 5), JSON.stringify(segDurs.map(d => +d.toFixed(1))));
+  // 边界不落在快切串中间（前后两个镜头都 <2s 的位置不适合换曲）
+  const badBounds = ranges.slice(1).filter(r => shots[r.a - 1].dur < 2 && shots[r.a].dur < 2);
+  ok("换曲边界不落在快切串中间", badBounds.length === 0, JSON.stringify(badBounds.map(r => r.a)));
+  // 对照组：整片节奏均匀（全是 3s 镜头）+ 同情绪 → 仍然不该切碎
+  const uni = Array.from({ length: 30 }, (_, i) => ({ i, t0: i * 3, t1: i * 3 + 3, dur: 3, mood: "温暖治愈", moodVec: new Float32Array([1, 0, 0]) }));
+  const ru = G.dpSegments(uni, { maxSegs: G.MAX_SEGS, minSeg: G.MIN_SEG });
+  ok("对照组：节奏均匀+同情绪 → 少量段（≤3）", ru.length <= 3, "段数 " + ru.length);
+}
+
 // ================= 汇总 =================
 console.log("\n" + "=".repeat(52));
 console.log("通过 " + pass + " 项，失败 " + fail + " 项");
