@@ -525,6 +525,43 @@ section("T13 跨集去重 + 音效过滤 + 艺人打散");
   G.decodeVec = oldDecode; G.getVec = oldGet;
 }
 
+// ================= T14 网络报错归因（用户实测：点了测试只有一句 Failed to fetch）=================
+{
+  section("T14 报错归因：CSP 定位 + 连接探活二分");
+
+  // 1) CSP 命中前后，Failed to fetch 的报错必须有差别
+  G.CSP_HITS.length = 0;
+  const noCsp = G.wrapNetError(new TypeError("Failed to fetch"),
+    "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings", 45000).message;
+  ok("没命中 CSP 时不出现「CSP」字样（不误报）", noCsp.indexOf("CSP") < 0, noCsp.slice(0, 40));
+
+  G.CSP_HITS.push("connect-src https://dashscope.aliyuncs.com ← https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings");
+  const cspMsg = G.wrapNetError(new TypeError("Failed to fetch"),
+    "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings", 45000).message;
+  ok("命中 CSP 时把 violatedDirective 带出来", /CSP/.test(cspMsg) && /connect-src/.test(cspMsg), cspMsg.slice(0, 80));
+  ok("命中 CSP 时给出可执行的自证办法", /无痕/.test(cspMsg), cspMsg.slice(-60));
+  G.CSP_HITS.length = 0;
+
+  // 2) 探活结果的三种分岔必须给出三种不同结论
+  const v1 = G.probeVerdict({ origin: "https://a", plain: "HTTP 200", auth: "HTTP 401" });
+  ok("探活：连接通 + 预检通 → 问题在 embeddings 请求本身", /预检也通过/.test(v1), v1.slice(0, 60));
+  const v2 = G.probeVerdict({ origin: "https://a", plain: "HTTP 200", auth: "❌ Failed to fetch" });
+  ok("探活：连得上但带鉴权被拦 → 判定 CORS 预检被拒", /预检被拒/.test(v2), v2.slice(0, 60));
+  const v3 = G.probeVerdict({ origin: "https://a", plain: "❌ Failed to fetch", auth: "❌ Failed to fetch" });
+  ok("探活：连不带鉴权都失败 → 归因到本机代理/安全软件", /代理/.test(v3) && /安全软件/.test(v3), v3.slice(0, 60));
+  const v4 = G.probeVerdict(null);
+  ok("探活无结果时不崩、照样给结论", /连不带鉴权的 GET 都失败/.test(v4), v4.slice(0, 40));
+
+  // 3) 网络文案不能吞掉真正的服务端错误
+  const passthrough = G.wrapNetError(new Error("HTTP 401：Incorrect API key"), "https://x/embeddings", 45000);
+  ok("鉴权类错误原样透传（不被网络文案覆盖）", /Incorrect API key/.test(passthrough.message));
+
+  // 4) 探活里的异常要压成短句，否则报错会层层嵌套成一堵墙
+  const long = G.wrapNetError(new TypeError("Failed to fetch"), "https://a.invalid/v1/embeddings", 45000).message;
+  const se = G.shortErr(new Error(long));
+  ok("shortErr 把整段归因压成一句话", se.length <= 71 && /^Failed to fetch/.test(se), se);
+}
+
 // ================= 汇总 =================
 console.log("\n" + "=".repeat(52));
 console.log("通过 " + pass + " 项，失败 " + fail + " 项");

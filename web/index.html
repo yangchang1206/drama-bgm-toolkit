@@ -305,6 +305,30 @@ function fmt(t) { t=Math.max(0,Math.floor(t)); return Math.floor(t/60)+":"+Strin
 // 实测（tools/probe_net.js，真浏览器）：同一个 Key 在 curl 与浏览器里都 200，
 // 唯一能稳定造出 Failed to fetch 的，就是下面这三条。
 function isHttpsPage() { try { return typeof location !== "undefined" && location.protocol === "https:"; } catch(e){ return false; } }
+
+// 页面被注入 CSP（浏览器扩展 / 安全软件 / 某些部署方式会加 connect-src）时，fetch 会被
+// **当场拦掉**，同样只抛一句 "Failed to fetch" —— 但浏览器其实把真实原因派发出来了：
+// securitypolicyviolations 事件。把它记下来，失败时跟着一起报，省得用户去猜。
+// （实测：给页面加 `connect-src 'self'` 后，报错与用户看到的那句逐字一致。）
+var CSP_HITS = [];
+try {
+  document.addEventListener("securitypolicyviolations", function (ev) {
+    try {
+      var d = String((ev && ev.violatedDirective) || "");
+      if (/^(connect-src|default-src|form-action)/.test(d)) {
+        CSP_HITS.push(d + " ← " + String((ev && ev.blockedURI) || ""));
+        if (CSP_HITS.length > 5) CSP_HITS.shift();
+      }
+    } catch (e) {}
+  });
+} catch (e) {}
+function cspHint() {
+  if (!CSP_HITS.length) return "";
+  return "\n\n🛑 已定位根因：本页被 **CSP（内容安全策略）** 拦截 —— 违规项：" + CSP_HITS[CSP_HITS.length - 1] +
+    "\n👉 这与 Key、接口地址都无关：通常是浏览器扩展（广告拦截/隐私保护）、安全软件，或页面所处站点注入的 connect-src 限制。" +
+    "\n最快的自证：换一个无痕窗口（默认禁用扩展）再点一次测试；本地文件则直接双击、用默认浏览器打开。";
+}
+
 function wrapNetError(e, url, timeoutMs) {
   var name = (e && e.name) || "Error";
   var msg = String((e && e.message) || e);
@@ -322,8 +346,9 @@ function wrapNetError(e, url, timeoutMs) {
       " 按顺序核对三条：① 接口地址是否写错或已失效；第三方中转站通常**不返回 CORS 头**，" +
       "网页端会被浏览器直接拦掉，而 curl / 本地客户端一切正常，这种情况最容易被误判成 Key 不对；" +
       "② 地址是否为 https（在线版页面是 https，填 http 会被当混合内容拦掉）；" +
-      "③ 本机网络、代理或安全软件是否放行该域名。　→ 最快的自证：把「接口地址」清空（走官方），再点一次测试。" +
-      "　当前地址：" + url);
+      "③ 本机网络、代理或安全软件是否放行该域名。" +
+      "　→ 自证：填了第三方地址就清空「接口地址」走官方再点一次测试；**已经是官方地址就直接看下面的探活结论**。" +
+      "　当前地址：" + url + cspHint());
   }
   return e;
 }
@@ -451,6 +476,57 @@ async function probeBase(baseUrl, key, timeoutMs) {
   return await r.json();
 }
 
+// 把异常压成短句 —— 探活结论里若原样塞进 wrapNetError 的整段文案，
+// 报错会层层嵌套变成一堵墙（实测发现，已修）。
+function shortErr(e) {
+  var m = String((e && e.message) || e).replace(/\s+/g, " ");
+  var cut = m.split(/——|。|：|\n/)[0] || m;
+  cut = cut.trim();
+  return cut.slice(0, 70) + (cut.length > 70 ? "…" : "");
+}
+
+// 失败后的「二分探活」：两发不带真实凭据的请求，把两类根因分开 ——
+//   A. 连域名都连不上 ⇒ 代理接管了请求（内核没起 / 端口已死）、防火墙、安全软件、DNS
+//   B. 连得上、一加 Authorization 就被拦 ⇒ CORS 预检被拒（中转站缺 CORS 头）
+// 第一发 GET **不带任何自定义头** ⇒ 浏览器不发预检，直接暴露「连接层」的真相；
+// 第二发 GET 带 Authorization ⇒ **必发预检**，它能拿到状态码就说明 CORS 头没问题
+// （401/404/405 都算通 —— 重点是「响应拿得到」，而不是状态码是多少）。
+async function connProbe(baseUrl, timeoutMs) {
+  var origin = String(baseUrl || DS_OFFICIAL).replace(/\/+$/, "");
+  var ms = timeoutMs || 8000;
+  var out = { origin: origin, plain: "", auth: "" };
+  try {
+    var r = await doFetch(origin + "/", { method: "GET" }, "直连", ms);
+    out.plain = "HTTP " + r.status;
+  } catch (e) { out.plain = "❌ " + shortErr(e); }
+  try {
+    var r2 = await doFetch(origin + "/models", { method: "GET", headers: { "Authorization": "Bearer probe" } }, "直连", ms);
+    out.auth = "HTTP " + r2.status;
+  } catch (e) { out.auth = "❌ " + shortErr(e); }
+  return out;
+}
+
+// 纯函数：把探活结果翻译成人话（单独抽出来是为了能被自检直接断言）
+function probeVerdict(p) {
+  var okPlain = !!(p && /^HTTP \d/.test(p.plain));
+  var okAuth = !!(p && /^HTTP \d/.test(p.auth));
+  if (okPlain && okAuth) {
+    return "🔎 探活：域名可连（" + p.plain + "）、带鉴权的预检也通过（" + p.auth + "）⇒ 连接与 CORS 都没问题，" +
+           "问题出在这次 embeddings 请求本身（接口地址的路径或参数）。";
+  }
+  if (okPlain && !okAuth) {
+    return "🔎 探活：**不带鉴权能连上（" + p.plain + "），一带 Authorization 就被拦** ⇒ 典型的 **CORS 预检被拒**：" +
+           "该地址没有返回 access-control-allow-* 响应头（第三方中转站最常见），curl / 本地客户端一切正常，网页端必挂。" +
+           "\n👉 解决：把「接口地址」清空改用官方；确实要用中转站，就让对方补上 CORS 响应头。";
+  }
+  return "🔎 探活：**连不带鉴权的 GET 都失败**（" + (p ? p.plain : "无结果") + "）⇒ 与 Key、CORS 都无关，" +
+         "是本机到该域名的连接被断掉了：代理软件接管了请求（内核没启动 / 端口已死）、防火墙或安全软件拦截、" +
+         "DNS 解析失败、或域名不可达。" +
+         "\n👉 自证三步：① 用浏览器直接打开 " + (p && p.origin ? p.origin : "该接口域名") + " 看能否访问；" +
+         "② 检查是否开着代理 / VPN —— 关掉再试，或确认它的内核确实在监听（端口转发工具失效时表现就是这个）；" +
+         "③ 临时关掉安全软件 / 广告拦截扩展，或换无痕窗口再点一次测试。";
+}
+
 document.getElementById("testKeyBtn").onclick = async function() {
   var msg = document.getElementById("apiMsg");
   var key = document.getElementById("apiKey").value.trim();
@@ -465,10 +541,21 @@ document.getElementById("testKeyBtn").onclick = async function() {
     msg.className = "api-msg ok";
   } catch(e) {
     var report = "❌ " + e.message;
+    var official = !base || normBase(base) === DS_OFFICIAL;
+    // 二分探活：先分清「连不上」还是「预检被拒」，且**不管理接口地址填没填都跑**。
+    // 旧版只在填了地址时才自证 —— 用官方默认地址（最常见的情形）的人拿到的
+    // 只有一句裸的 Failed to fetch，毫无线索，只能自己瞎猜。
+    msg.textContent = "⏳ 诊断中：先探活连接层，再判断是不是预检被拦...";
+    msg.className = "api-msg";
+    var verdict = "";
+    try { verdict = probeVerdict(await connProbe(normBase(base), 8000)); }
+    catch (err) { verdict = "🔎 探活本身失败：" + String((err && err.message) || err); }
+    report += "\n\n" + verdict;
+    if (official) report += "\n（你当前用的就是阿里云官方地址 ⇒「地址填错」「中转站不给 CORS 头」这两条可以直接排除。）";
     // 自证：填的不是官方地址时，再用官方地址静默复测一次。
     // 官方通过 ⇒ Key 完全没问题，锅 100% 在那个第三方地址上（不可达 / 无 CORS / 协议不对）。
     // 没有这一步，用户只会一直怀疑自己的 Key，然后原地打转。
-    if (base) {
+    if (base && !official) {
       msg.textContent = "⏳ 诊断中：再用阿里云官方地址复测一次，判断是 Key 的问题还是接口地址的问题...";
       msg.className = "api-msg";
       try {
