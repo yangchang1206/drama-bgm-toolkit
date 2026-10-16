@@ -47,7 +47,7 @@ input[type=range] { width: 100%; margin-top: 6px; }
 .api-box { background:#fff; border-radius:8px; padding:10px 16px; margin:0 16px 10px; display:flex; gap:8px; align-items:center; box-shadow:0 1px 3px rgba(0,0,0,.08); flex-wrap:wrap; }
 .api-box label { font-size:12px; color:#666; white-space:nowrap; }
 .api-box input { flex:1; font-size:12px; min-width:180px; }
-.api-msg { font-size:12px; margin-left:8px; }
+.api-msg { font-size:12px; margin:6px 0 0; flex-basis:100%; white-space:pre-line; line-height:1.65; }
 .api-msg.ok { color:#059669; }
 .api-msg.err { color:#dc2626; }
 .export-btn { width:100%; padding:12px; font-size:15px; margin-top:12px; background:#059669; }
@@ -298,16 +298,49 @@ function yieldUI() { return new Promise(function(r){setTimeout(r,0);}); }
 function esc(s) { return String(s==null?"":s).replace(/[&<>'"]/g, function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];}); }
 function fmt(t) { t=Math.max(0,Math.floor(t)); return Math.floor(t/60)+":"+String(t%60).padStart(2,"0"); }
 
+// 网络层异常的「翻译器」。
+// fetch() 抛的 TypeError 只有干巴巴一句 "Failed to fetch"，真正的原因
+// （CORS 预检被拒 / 混合内容被拦 / DNS 失败）只写在 DevTools 里，
+// 用户看到的却是一句和鉴权毫无关系的英文 ⇒ 九成人会误判成「Key 不对」。
+// 实测（tools/probe_net.js，真浏览器）：同一个 Key 在 curl 与浏览器里都 200，
+// 唯一能稳定造出 Failed to fetch 的，就是下面这三条。
+function isHttpsPage() { try { return typeof location !== "undefined" && location.protocol === "https:"; } catch(e){ return false; } }
+function wrapNetError(e, url, timeoutMs) {
+  var name = (e && e.name) || "Error";
+  var msg = String((e && e.message) || e);
+  if (isHttpsPage() && /^http:\/\//i.test(url)) {
+    return new Error("接口地址是 http://，本页却是 https:// —— 浏览器按「混合内容」直接拦掉，请求根本没发出去。" +
+                     " → 把接口地址改成 https:// 开头，或清空它用官方地址。");
+  }
+  if (name === "AbortError" || /abort/i.test(msg)) {
+    return new Error("请求超时（" + Math.round((timeoutMs || 45000) / 1000) + " 秒内目标地址毫无响应）：" + url +
+                     " → 该域名多半不可达：被墙、DNS 解析失败、或中转服务已停。" +
+                     " 先用浏览器直接打开 " + url.replace(/\/embeddings$/, "") + " 看能不能连上。");
+  }
+  if (/Failed to fetch|NetworkError|Load failed|Network request failed|ERR_/i.test(msg)) {
+    return new Error("Failed to fetch —— 浏览器连一个响应都没收到，**这不是鉴权问题**（Key 错会返回 401 并带错误正文）。" +
+      " 按顺序核对三条：① 接口地址是否写错或已失效；第三方中转站通常**不返回 CORS 头**，" +
+      "网页端会被浏览器直接拦掉，而 curl / 本地客户端一切正常，这种情况最容易被误判成 Key 不对；" +
+      "② 地址是否为 https（在线版页面是 https，填 http 会被当混合内容拦掉）；" +
+      "③ 本机网络、代理或安全软件是否放行该域名。　→ 最快的自证：把「接口地址」清空（走官方），再点一次测试。" +
+      "　当前地址：" + url);
+  }
+  return e;
+}
+
 // 单次 fetch，带超时，并在响应上标记走的是哪条通道（便于排错）
-async function doFetch(url, options, via) {
+async function doFetch(url, options, via, timeoutMs) {
+  var ms = timeoutMs || 45000;
   var controller = new AbortController();
-  var timer = setTimeout(function(){ controller.abort(); }, 45000);
+  var timer = setTimeout(function(){ controller.abort(); }, ms);
   try {
     var opts = {}; for (var k in (options||{})) opts[k] = options[k];
     opts.signal = controller.signal;
     var r = await fetch(url, opts);
     try { r.__via = via || "直连"; } catch(e) {}
     return r;
+  } catch (e) {
+    throw wrapNetError(e, url, ms);   // 一处归因，所有调用点自动受益
   } finally {
     clearTimeout(timer);
   }
@@ -407,6 +440,17 @@ document.getElementById("saveKeyBtn").onclick = function() {
   } catch(e) { alert("保存失败: "+e.message); }
 };
 
+// 单次 embeddings 探测（带 Authorization ⇒ 走直连）。失败时抛出**带服务端正文**的 Error。
+async function probeBase(baseUrl, key, timeoutMs) {
+  var r = await doFetch(String(baseUrl).replace(/\/+$/, "") + "/embeddings", {
+    method: "POST",
+    headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "text-embedding-v3", input: ["test"], dimensions: 1024, encoding_format: "float" })
+  }, "直连", timeoutMs);
+  if (!r.ok) throw new Error(await apiErr(r));
+  return await r.json();
+}
+
 document.getElementById("testKeyBtn").onclick = async function() {
   var msg = document.getElementById("apiMsg");
   var key = document.getElementById("apiKey").value.trim();
@@ -414,17 +458,32 @@ document.getElementById("testKeyBtn").onclick = async function() {
   if (!key) { msg.textContent = "⚠️ 请先填Key"; msg.className = "api-msg err"; return; }
   msg.textContent = "⏳ 测试中（最多45秒）..."; msg.className = "api-msg";
   try {
-    var r = await apiFetch(normBase(base) + "/embeddings", {
-      method: "POST",
-      headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "text-embedding-v3", input: ["test"], dimensions: 1024, encoding_format: "float" })
-    });
-    if (!r.ok) throw new Error(await apiErr(r));
-    var j = await r.json();
-    msg.textContent = "✅ 连接成功（维度 " + (j.data && j.data[0] && j.data[0].embedding ? j.data[0].embedding.length : "?") + "）";
+    var j = await probeBase(normBase(base), key);
+    var dim = (j.data && j.data[0] && j.data[0].embedding) ? j.data[0].embedding.length : "?";
+    if (dim !== 1024) throw new Error("接口通了，但返回维度是 " + dim + "（不是 1024）。曲库索引是 1024 维，维度不符会一首曲子都选不出来。");
+    msg.textContent = "✅ 连接成功（维度 " + dim + "｜接口 " + (base || "阿里云官方") + "）";
     msg.className = "api-msg ok";
   } catch(e) {
-    msg.textContent = "❌ " + e.message;
+    var report = "❌ " + e.message;
+    // 自证：填的不是官方地址时，再用官方地址静默复测一次。
+    // 官方通过 ⇒ Key 完全没问题，锅 100% 在那个第三方地址上（不可达 / 无 CORS / 协议不对）。
+    // 没有这一步，用户只会一直怀疑自己的 Key，然后原地打转。
+    if (base) {
+      msg.textContent = "⏳ 诊断中：再用阿里云官方地址复测一次，判断是 Key 的问题还是接口地址的问题...";
+      msg.className = "api-msg";
+      try {
+        await probeBase(DS_OFFICIAL, key, 12000);
+        report += "\n\n🔎 复测结论：同一个 Key 走【阿里云官方地址】是通的 ⇒ Key 没问题，" +
+                  "问题出在你填的接口地址「" + base + "」上。" +
+                  "\n👉 解决：把「接口地址」清空（用官方）即可；若确实要用中转站，请确认该地址可访问且带 CORS 响应头。" +
+                  "\n（提示：第三方中转站普遍不返回 CORS 头，网页端会被浏览器拦成 Failed to fetch，而 curl / 客户端却一切正常。）";
+      } catch(e2) {
+        report += "\n\n🔎 复测结论：连【阿里云官方地址】也失败 ⇒ 不是接口地址的问题，而是 Key 或本机网络的问题。" +
+                  "\n官方地址的失败原因：" + String(e2.message || "").slice(0, 140) +
+                  "\n👉 核对：① Key 是否属于阿里云百炼（且未被禁用/欠费）；② 本机能否访问 dashscope.aliyuncs.com。";
+      }
+    }
+    msg.textContent = report;
     msg.className = "api-msg err";
   }
 };
