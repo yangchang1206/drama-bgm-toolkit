@@ -414,6 +414,117 @@ section("T12 选中的候选曲 + 它的裁剪，真的作用到导出（端到�
   ok("输出总长仍 = 视频时长 60s", near(r.buf.duration, 60, 1e-3), r.buf.duration.toFixed(3));
 }
 
+// ================= T13 跨集去重（用户实测：每集都有重复的音乐）=================
+section("T13 跨集去重 + 音效过滤 + 艺人打散");
+{
+  const N = 60;
+  const lib = [], sm = {};
+  for (let i = 0; i < N; i++) {
+    const v = new Float32Array(8);
+    v[0] = 1; v[1] = (i / N) * 0.6;              // 带梯度：排序确定但不全同分
+    const nm = Math.hypot(v[0], v[1]) || 1; v[0] /= nm; v[1] /= nm;
+    const dur = i < 10 ? 3 : 90;                  // 前 10 首是 <12s 的音效
+    const artist = i < 20 ? "同一人" : ("艺人" + (i % 25));
+    const fn = artist + " - Tra" + i + ".mp3";
+    lib.push({ fn: fn, voc: "no", v: v, dur: dur, bpm: 100, eng: 0.5, ton: "" });
+    sm[fn.toLowerCase()] = { f: fn };
+  }
+  G.EMB = lib; G.SONG_MAP = sm; G.EMB_DECODED = null;
+  const oldDecode = G.decodeVec, oldGet = G.getVec;
+  G.decodeVec = (x) => x; G.getVec = (e) => e.v;     // 绕过 base64，直接给向量
+  const q = new Float32Array([1, 0, 0, 0, 0, 0, 0, 0]);
+  const mkSeg = (d) => ({ dur: d || 30, wantBpm: 100, eng: 0.5, candidates: [], track: 0, timeStart: 0, timeEnd: d || 30 });
+
+  // --- 艺人解析 ---
+  ok("artistOf 取 \" - \" 前段", G.artistOf("彭飞 - 妈！.mp3") === "彭飞");
+  ok("V.A. / 群星 不算艺人（避免误伤合集）",
+     G.artistOf("V.A. - x.mp3") === "" && G.artistOf("群星 - y.mp3") === "");
+  ok("无 \" - \" 的文件名不算艺人", G.artistOf("转场.mp3") === "");
+
+  // --- 音效过滤 ---
+  const c0 = G.pickTracks(q, mkSeg(), new Set(), 10, {});
+  ok("候选中不含 <12s 的音效素材", c0.every(c => c.dur >= 12), "最小 dur=" + Math.min.apply(null, c0.map(c => c.dur)));
+  ok("候选含 10 首", c0.length === 10, c0.length);
+
+  // --- 历史池：本集旧记录不参与排除（重跑同一集结果稳定）---
+  G.saveHistory({});
+  const ep1Picks = [];
+  {
+    const pool = G.historyPool("ep1", 4, N);
+    ok("第 1 集无历史可排除", pool.set.size === 0 && pool.eps === 0);
+    const used = pool.set, epArt = {};
+    for (let k = 0; k < 4; k++) {
+      const cd = G.pickTracks(q, mkSeg(), used, 10, epArt);
+      ep1Picks.push(cd[0].fn); used.add(cd[0].fn);
+      const a = G.artistOf(cd[0].fn); if (a) epArt[a] = 1;
+    }
+    G.rememberEpisode("ep1", ep1Picks);
+  }
+  ok("第 1 集 4 段用了 4 首不同曲子", new Set(ep1Picks).size === 4, ep1Picks.join(","));
+  ok("记住第 1 集后再读，本集记录不排除自己", G.historyPool("ep1", 4, N).set.size === 0);
+
+  const pool2 = G.historyPool("ep2", 4, N);
+  ok("第 2 集能读到第 1 集用过的 4 首", pool2.set.size === 4 && pool2.eps === 1, pool2.set.size);
+  {
+    const used = pool2.set, epArt = {};
+    const ep2Picks = [];
+    for (let k = 0; k < 4; k++) {
+      const cd = G.pickTracks(q, mkSeg(), used, 10, epArt);
+      ep2Picks.push(cd[0].fn); used.add(cd[0].fn);
+      const a = G.artistOf(cd[0].fn); if (a) epArt[a] = 1;
+    }
+    const dup = ep2Picks.filter(f => ep1Picks.indexOf(f) >= 0);
+    ok("第 2 集选出的曲与第 1 集零重叠（旧版这里是 100% 重叠）", dup.length === 0, dup.join(","));
+    G.rememberEpisode("ep2", ep2Picks);
+  }
+
+  // --- 端到端：5 集 × 4 段 ---
+  G.saveHistory({});
+  const all = [];
+  for (let ep = 1; ep <= 5; ep++) {
+    const pool = G.historyPool("ep" + ep, 4, N);
+    const used = pool.set, epArt = {}, picks = [];
+    for (let k = 0; k < 4; k++) {
+      const cd = G.pickTracks(q, mkSeg(), used, 10, epArt);
+      picks.push(cd[0].fn); used.add(cd[0].fn);
+      const a = G.artistOf(cd[0].fn); if (a) epArt[a] = 1;
+    }
+    G.rememberEpisode("ep" + ep, picks);
+    all.push.apply(all, picks);
+  }
+  ok("5 集 20 段 → 20 首不同曲子（跨集重复率 0%）", new Set(all).size === 20,
+     "不同 " + new Set(all).size + " / 20");
+
+  // --- 同一集内艺人打散（软扣分）---
+  {
+    // 造两首：A 与已用艺人同名且分数更高，B 分略低但艺人新 → 应选 B
+    const lib2 = [
+      { fn: "已用者 - hot.mp3", voc: "no", v: [1, 0, 0, 0], dur: 90, bpm: 100, eng: 0.5, ton: "" },
+      { fn: "新艺人 - alt.mp3", voc: "no", v: [0.985, 0, 0, 0], dur: 90, bpm: 100, eng: 0.5, ton: "" }
+    ];
+    const old = G.EMB; G.EMB = lib2; G.EMB_DECODED = null;
+    G.SONG_MAP = { "已用者 - hot.mp3": {}, "新艺人 - alt.mp3": {} };
+    const noArt = G.pickTracks(q, mkSeg(), new Set(), 2, {});
+    ok("不打散时选分数最高的那首", noArt[0].fn.indexOf("hot") >= 0, noArt[0].fn);
+    const withArt = G.pickTracks(q, mkSeg(), new Set(), 2, { "已用者": 1 });
+    ok("同集内已用过该艺人 → 换新的那首（软扣分生效）", withArt[0].fn.indexOf("alt") >= 0, withArt[0].fn);
+    G.EMB = old; G.EMB_DECODED = null;
+  }
+
+  // --- 预算兜底：历史占用超过曲库上限时丢弃更早的集 ---
+  {
+    const h = {};
+    for (let i = 0; i < 8; i++) h["old" + i] = { t: i, fns: ["f" + (i * 6) + ".mp3", "f" + (i * 6 + 1) + ".mp3", "f" + (i * 6 + 2) + ".mp3", "f" + (i * 6 + 3) + ".mp3", "f" + (i * 6 + 4) + ".mp3", "f" + (i * 6 + 5) + ".mp3"] };
+    G.saveHistory(h);
+    const p = G.historyPool("newep", 4, N);      // N=60 → 预算 max(16, 27) = 27
+    ok("超预算时保留最近的集、丢弃更早的", p.eps > 0 && p.dropped > 0 && p.set.size <= 27,
+       "保留 " + p.eps + " 集/" + p.set.size + " 首，丢弃 " + p.dropped + " 集");
+  }
+
+  G.saveHistory({});
+  G.decodeVec = oldDecode; G.getVec = oldGet;
+}
+
 // ================= 汇总 =================
 console.log("\n" + "=".repeat(52));
 console.log("通过 " + pass + " 项，失败 " + fail + " 项");

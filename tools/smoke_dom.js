@@ -105,6 +105,7 @@ async function getJson(url) {
       // 拦掉弹窗：无头下 alert() 会阻塞整页 JS，导致后面的求值永远不返回
       window.__alerts = [];
       window.alert = function (m) { window.__alerts.push(String(m)); };
+      window.confirm = function () { return true; };   // 清空配乐记录会弹 confirm，同样会阻塞
       SHOTS = [];
       for (var i = 0; i < 6; i++) SHOTS.push({ i:i, t0:i*5, t1:i*5+5, dur:5, mood:"温暖治愈",
         moodVec:new Float32Array(1024), source:"剧本", ruleMood:"温暖治愈", ruleScore:1, eng:0.5,
@@ -154,6 +155,37 @@ async function getJson(url) {
     ok("裁剪值写到了第 2 首自己身上（7.5/12）", interact.cut === "7.5/12", interact.cut);
     ok("裁剪提示文案更新", /手动裁剪/.test(interact.note), interact.note);
     ok("候选行标出该曲已被剪过", interact.badge >= 1, interact.badge);
+
+    console.log("【S4 跨集去重控件（M9）】");
+    const dedup = await evaluate(`(function(){
+      var err = null, before = null, after = {}, info = "";
+      try {
+        var chk = document.getElementById("dedupChk");
+        var row = document.getElementById("dedupRow");
+        var btn = document.getElementById("clearHistBtn");
+        before = { has: !!chk, checked: !!(chk && chk.checked), hasBtn: !!btn,
+                   hasFn: typeof loadHistory === "function" && typeof historyPool === "function" };
+        saveHistory({ "epA#100KB": { t: 1, fns: ["x.mp3", "y.mp3"] } });
+        if (window.__dedupRefresh) window.__dedupRefresh();
+        info = (document.getElementById("histInfo") || {}).textContent || "";
+        btn.click();                                   // confirm 已 stub 成 true
+        after.cleared = Object.keys(loadHistory()).length === 0;
+        chk.checked = false; chk.onchange();
+        after.offCls = String(row.className).indexOf("off") >= 0;
+        var p = historyPool("epB", 4, 100);            // 关闭后不该排除任何曲目
+        after.noHist = p.set.size === 0;
+        chk.checked = true; chk.onchange();
+      } catch (e) { err = e.message; }
+      return { err: err, before: before, info: info, after: after };
+    })()`);
+    ok("去重控件齐全（复选框 + 清空按钮 + 三个函数）",
+       dedup.before && dedup.before.has && dedup.before.hasBtn && dedup.before.hasFn, JSON.stringify(dedup.before));
+    ok("默认勾选「跨集避免重复用曲」", dedup.before && dedup.before.checked === true);
+    ok("记录计数文案随历史更新", /1 集/.test(dedup.info || ""), dedup.info);
+    ok("点【清空配乐记录】后历史归零", dedup.after && dedup.after.cleared === true);
+    ok("关掉开关时区块样式切换", dedup.after && dedup.after.offCls === true);
+    ok("关掉开关后不再排除任何曲目", dedup.after && dedup.after.noHist === true);
+    ok("控件交互全程无异常", !dedup.err, dedup.err);
 
     await sleep(300);
     console.log("\n" + "=".repeat(46));

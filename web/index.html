@@ -5,7 +5,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>BGM工作台 v5.0</title>
+<title>BGM工作台 v5.1</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
 <style>
@@ -89,12 +89,21 @@ input[type=range] { width: 100%; margin-top: 6px; }
 .mini-play { float:right; padding:0 6px; font-size:10px; background:#0ea5e9; border:none; color:#fff; border-radius:3px; cursor:pointer; }
 .mini-play:hover { background:#0284c7; }
 .fit-note { font-size:10px; color:#64748b; margin-top:2px; }
+.dedup-row { margin-top:8px; padding:6px 8px; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:6px;
+  font-size:11px; color:#166534; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.dedup-row label { display:flex; align-items:center; gap:4px; cursor:pointer; }
+.dedup-row .mini-btn { padding:2px 7px; font-size:10px; background:#fff; border:1px solid #86efac; color:#166534;
+  border-radius:4px; cursor:pointer; }
+.dedup-row .mini-btn:hover { background:#dcfce7; }
+.dedup-row .hist-info { color:#15803d; font-size:10px; }
+.dedup-row.off { background:#f8fafc; border-color:#e2e8f0; color:#64748b; }
+.dedup-row.off .mini-btn { border-color:#cbd5e1; color:#475569; }
 @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
 <h1>🎬 BGM 工作台</h1>
-<div class="ver">版本 v5.0 · 情绪以剧本为主 + 视频节奏控换曲 + 候选曲各自剪切</div>
+<div class="ver">版本 v5.1 · 情绪以剧本为主 + 视频节奏控换曲 + 候选曲各自剪切 + 跨集不重复用曲</div>
 <div class="sub">选音乐库 → 上传视频+剧本 → 检测镜头 → <b>情绪以剧本为主</b>、视频节奏控换曲 → 点哪首剪哪首 → 导出MP3/WAV</div>
 
 <div id="globalErr"></div>
@@ -149,6 +158,11 @@ input[type=range] { width: 100%; margin-top: 6px; }
     <div class="tp-row">
       <label>🎯 BGM分段时间点:</label>
       <input type="text" id="timepoints" placeholder="示例: 0-22.5, 22.5-108">
+    </div>
+    <div class="dedup-row" id="dedupRow">
+      <label><input type="checkbox" id="dedupChk"> 🔁 跨集避免重复用曲</label>
+      <button id="clearHistBtn" class="mini-btn">🗑 清空配乐记录</button>
+      <span id="histInfo" class="hist-info"></span>
     </div>
     <button id="analyzeBtn" disabled>🔍 剧本情绪分析 + 自动选曲（画面补充）</button>
     <div class="fmt-row">
@@ -247,6 +261,22 @@ var FE_MIN = 1.5, FE_MAX = 4.0;   // 交叉淡入自适应区间（秒）
 
 // 选曲四维权重：情绪 0.45 + 时长 0.25 + 节奏 0.20 + 能量 0.10
 var W_MOOD = 0.45, W_DUR = 0.25, W_BPM = 0.20, W_ENG = 0.10;
+
+// ===================== M9 选曲多样性（解决「每集都有重复的音乐」）=====================
+// 根因（tools/analyze_dup.py 实测）：情绪只有 8 档、每档只有 1 条固定 query 字符串，
+// 而段的 query 就是镜头 query 的平均向量 ⇒ 余弦排序**完全确定**，与具体剧情无关；
+// 且 usedSongs 只在单次分析内有效、每集重置 ⇒ 每集都从曲库同一个位置开始选。
+//   模拟 3 集连配（每集 4 段、情绪档序列相同）：
+//     现状        → 12 段只用到 4 首曲子，第1集与第2集选中的 4 首**完全相同**（重复率 67%）
+//     跨集共用池  → 12 段 12 首，重复率 0%
+// 修法：① 跨集已用池（localStorage，本集旧记录不参与排除，保证重跑同一集结果稳定）
+//       ② 同一集内重复艺人软扣分 ③ 过滤 <12s 的音效素材（曲库里混了 949 首）。=================
+var SONG_MIN_DUR = 12;      // 短于此的素材多为音效（转场/震惊/唰…），不是 BGM
+var ARTIST_PENALTY = 0.05;  // 同集内重复艺人扣分（"彭飞"226 首、"孟可"120 首，同专辑风格极像）
+var HIST_KEY = "bgm_used_pool";
+var HIST_MAX_FRAC = 0.45;   // 历史池最多占用曲库比例，超出丢弃更早的集（防曲线耗尽后选不出曲）
+var NO_HIST = storeGet("bgm_no_hist") === "1";   // 用户可关闭跨集去重
+var CUR_VKEY = "";          // 本次分析集的标识（导出时据此更新历史）
 
 // DP 代价权重
 var L_INSIDE = 1.0;   // 段内情绪不纯
@@ -1207,7 +1237,74 @@ function predecodeEmb() {
   EMB_DECODED = arr;
   return arr;
 }
-function pickTracks(qv, seg, usedSongs, limit) {
+// ===================== M9 跨集已用池 =====================
+// 为什么按"集"记而不是全局记：用户是**一集一集**配的，重跑同一集不该换掉整批曲子
+// （否则"我重跑一次怎么全变了"）。所以排除的是**其它集**用过的曲，本集旧记录不参与。
+function loadHistory() {
+  var h = null;
+  try { h = JSON.parse(storeGet(HIST_KEY) || "{}"); } catch (e) { h = null; }
+  if (!h || typeof h !== "object" || Array.isArray(h)) h = {};
+  // 老结构（直接是数组）→ 新结构 {t, fns}
+  for (var k in h) if (Array.isArray(h[k])) h[k] = { t: 0, fns: h[k] };
+  return h;
+}
+function saveHistory(h) { try { storeSet(HIST_KEY, JSON.stringify(h)); } catch (e) { } }
+// 视频标识：文件名 + 粗粒度大小。同名同大小的视频视为同一集。
+function videoKeyOf(file) {
+  if (!file) return "";
+  return (file.name || "video") + "#" + Math.round((file.size || 0) / 1024) + "KB";
+}
+// 构造排除集：收集**其它集**用过的曲目；超出曲库 HIST_MAX_FRAC 时丢弃更早的集。
+// 返回 {set, eps, dropped, total}
+function historyPool(key, needCount, libSize) {
+  var out = { set: new Set(), eps: 0, dropped: 0, total: 0 };
+  if (NO_HIST) return out;
+  var h = loadHistory(), others = [];
+  for (var k in h) {
+    if (k === key) continue;
+    var fns = (h[k] && h[k].fns) || [];
+    if (!fns.length) continue;
+    others.push({ k: k, t: (h[k] && h[k].t) || 0, fns: fns });
+  }
+  out.total = others.length;
+  others.sort(function (a, b) { return b.t - a.t; });           // 最近的优先保留
+  var N = libSize || (typeof EMB !== "undefined" && EMB ? EMB.length : 0) || 0;
+  // 预算：至少留够本次要用的 4 倍，且不超过曲库的 HIST_MAX_FRAC
+  var budget = Math.max((needCount || 0) * 4, Math.floor(N * HIST_MAX_FRAC));
+  for (var i = 0; i < others.length; i++) {
+    var f = others[i].fns;
+    if (out.set.size && out.set.size + f.length > budget) { out.dropped = others.length - i; break; }
+    for (var j = 0; j < f.length; j++) out.set.add(f[j]);
+    out.eps++;
+  }
+  return out;
+}
+// 记下某集用到的曲子（覆盖式）
+function rememberEpisode(key, fns) {
+  if (!key || NO_HIST) return;
+  var h = loadHistory();
+  h[key] = { t: Date.now(), fns: fns || [] };
+  saveHistory(h);
+}
+// 本集目前选中的曲子（导出/下次重跑的历史来源）
+function currentPicks() {
+  var out = [];
+  (STATE.segments || []).forEach(function (s) {
+    var c = (s.candidates || [])[s.track || 0];
+    if (c && c.fn) out.push(c.fn);
+  });
+  return out;
+}
+// 艺人：文件名 "艺人 - 曲名"。V.A./群星这类合集标记不算艺人（否则会误伤一大批）
+function artistOf(fn) {
+  var i = String(fn || "").indexOf(" - ");
+  if (i <= 0) return "";
+  var a = fn.slice(0, i).trim().toLowerCase();
+  if (/^(v\.?a\.?|various( artists)?|群星|合辑|未知|unknown)$/.test(a)) return "";
+  return a;
+}
+
+function pickTracks(qv, seg, usedSongs, limit, epArtists) {
   var V = predecodeEmb();
   var want = seg.wantBpm;
   var res = [];
@@ -1215,14 +1312,18 @@ function pickTracks(qv, seg, usedSongs, limit) {
     var e = EMB[i];
     if (vocIsVocal(e.voc)) continue;
     if (!SONG_MAP[e.fn.toLowerCase()]) continue;
-    if (usedSongs.has(e.fn)) continue;
+    if (e.dur && e.dur < SONG_MIN_DUR) continue;   // 音效/超短素材，当不了 BGM
+    if (usedSongs.has(e.fn)) continue;             // 本集已选 / 往集用过
     var en = V[i]; if (!en) continue;
     var L = Math.min(qv.length, en.length), sim = 0;
     for (var j = 0; j < L; j++) sim += qv[j] * en[j];
     var fDur = durFit(e.dur, seg.dur), fBpm = bpmFit(e.bpm, want), fEng = engFit(e.eng, seg.eng);
     var sc = W_MOOD * sim + W_DUR * fDur + W_BPM * fBpm + W_ENG * fEng;
+    var ar = artistOf(e.fn);
+    var sameArtist = !!(ar && epArtists && epArtists[ar]);
+    if (sameArtist) sc -= ARTIST_PENALTY;          // 软扣分：同集别老用同一个人的曲子
     res.push({ fn: e.fn, sim: sim, dur: e.dur || null, bpm: e.bpm || null, eng: (e.eng == null ? null : e.eng), ton: e.ton || "",
-               fDur: fDur, fBpm: fBpm, fEng: fEng, score: sc });
+               artist: ar, sameArtist: sameArtist, fDur: fDur, fBpm: fBpm, fEng: fEng, score: sc });
   }
   res.sort(function (a, b) { return b.score - a.score; });
   return res.slice(0, limit || 10);
@@ -1346,6 +1447,12 @@ async function renderDetail() {
     "<br><span style='color:#666;font-size:11px;'>"+(s.timeStart||0).toFixed(1)+"s - "+(s.timeEnd||0).toFixed(1)+"s"+
     "（"+(s.timeEnd-s.timeStart).toFixed(1)+"s / ASL "+s.asl.toFixed(2)+"s / 目标 "+Math.round(s.wantBpm)+"BPM / 能量 "+s.eng.toFixed(2)+"）</span>"+
     "<div class='query-box'>🔍 "+esc(s.query||"")+"</div>"+
+    ((s.avoided && (s.avoided.hist || s.avoided.ep))
+      ? "<div class='fit-note' style='color:#15803d;'>🔁 候选已避开 "+
+        (s.avoided.hist ? (s.avoided.hist+" 首往集用过的") : "")+
+        ((s.avoided.hist && s.avoided.ep) ? " + " : "")+
+        (s.avoided.ep ? (s.avoided.ep+" 首本集已选的") : "")+"</div>"
+      : "")+
     "<div class='song sel'>现在用的是：["+s.track+"] "+esc(cand.fn)+"</div>"+
     "<div class='fit-note'>"+fitOf(cand)+" ｜ 情绪余弦 "+(cand.sim||0).toFixed(3)+"</div>"+
     "<div class='cut-box'><b>✂ 剪这一首</b>（只作用于当前选中的这首，其它候选各记各的）<br>"+
@@ -1474,6 +1581,34 @@ async function ensureAnalyzeVideo(vf) {
   return analyzeVideoEl;
 }
 
+// ===================== M9 UI：跨集去重开关 =====================
+(function initDedupUI() {
+  var chk = document.getElementById("dedupChk");
+  var row = document.getElementById("dedupRow");
+  var info = document.getElementById("histInfo");
+  var clr = document.getElementById("clearHistBtn");
+  if (!chk || !row) return;
+  function refresh() {
+    var h = loadHistory(), eps = 0, songs = 0;
+    for (var k in h) { if (!(h[k] && h[k].fns)) continue; eps++; songs += h[k].fns.length; }
+    if (info) info.textContent = eps ? ("已记录 " + eps + " 集 / " + songs + " 首") : "暂无记录（配第 1 集）";
+    row.className = "dedup-row" + (chk.checked ? "" : " off");
+  }
+  chk.checked = !NO_HIST;
+  refresh();
+  chk.onchange = function () {
+    NO_HIST = !chk.checked;
+    storeSet("bgm_no_hist", NO_HIST ? "1" : "0");
+    refresh();
+  };
+  clr.onclick = function () {
+    if (!confirm("清空已记录的配乐历史？\n\n清空后每一集都会重新从曲库的同一位置开始选曲，跨集重复会再次出现。")) return;
+    saveHistory({});
+    refresh();
+  };
+  window.__dedupRefresh = refresh;   // 分析后刷新计数
+})();
+
 document.getElementById("analyzeBtn").onclick = async function () {
   if (!LIB_READY) { alert("请先点【匹配向量库】"); return; }
   var script = document.getElementById("script").value;
@@ -1597,7 +1732,11 @@ document.getElementById("analyzeBtn").onclick = async function () {
     // ---------- 7. M5 四维打分选曲 ----------
     predecodeEmb();
     STATE.segments = [];
-    var usedSongs = new Set();
+    // M9 跨集去重：排除**其它集**用过的曲子（本集旧记录不参与 ⇒ 重跑同一集结果稳定）
+    CUR_VKEY = videoKeyOf(vf);
+    var pool = historyPool(CUR_VKEY, ranges.length, EMB.length);
+    var usedSongs = pool.set;
+    var epArtists = {};            // 本集已用艺人（软打散）
     for (var gi = 0; gi < ranges.length; gi++) {
       var R = ranges[gi];
       var grp = SHOTS.slice(R.a, R.b);
@@ -1623,10 +1762,18 @@ document.getElementById("analyzeBtn").onclick = async function () {
       };
       setProgress(bar, 72 + Math.round((gi / ranges.length) * 20), "选曲 " + (gi + 1) + "/" + ranges.length);
       await yieldUI();
-      seg.candidates = pickTracks(qv, seg, usedSongs, 10);
-      if (seg.candidates.length) usedSongs.add(seg.candidates[0].fn);
+      seg.candidates = pickTracks(qv, seg, usedSongs, 10, epArtists);
+      seg.avoided = { hist: pool.set.size, ep: gi, histEps: pool.eps };   // 面板里说明"为什么少了某些曲子"
+      if (seg.candidates.length) {
+        usedSongs.add(seg.candidates[0].fn);
+        var arPick = artistOf(seg.candidates[0].fn);
+        if (arPick) epArtists[arPick] = 1;
+      }
       STATE.segments.push(seg);
     }
+    // 记下本集用曲：下次配别的集会自动避开（这是"每集都重复"的正面解法）
+    rememberEpisode(CUR_VKEY, currentPicks());
+    if (window.__dedupRefresh) window.__dedupRefresh();
 
     // ---------- 8. 渲染 ----------
     setProgress(bar, 95, "渲染...");
@@ -1645,6 +1792,13 @@ document.getElementById("analyzeBtn").onclick = async function () {
       " ｜ 乐段上限 " + Math.round(idealMax) + "s（越快剪换曲越勤）" +
       "\n分段方式：" + (userTP ? "你手填的时间点（已吸附到镜头切点）" : "DP 最优分段（边界全在镜头切点上）") +
       "\n选曲权重：情绪 0.45 / 时长 0.25 / BPM 0.20 / 能量 0.10" + (avgFit ? "\n" + avgFit : "") +
+      "\n🔁 跨集去重：" + (NO_HIST ? "已关闭（每集都从同一批曲子里选）"
+        : (pool.eps ? ("已避开 " + pool.set.size + " 首（来自 " + pool.eps + " 集）" + (pool.dropped ? "，更早的 " + pool.dropped + " 集记录因曲库余量不足已忽略" : ""))
+                    : "暂无历史（这是第 1 集）")) +
+      "　｜　本集选曲：" + STATE.segments.map(function (s, i) {
+        var c = (s.candidates || [])[s.track || 0];
+        return (i + 1) + "." + (c ? c.fn.replace(/\.[^.]+$/, "").slice(0, 16) : "-");
+      }).join(" / ") +
       "\n✂ 右侧详情面板：点哪首候选曲就剪哪首（起点/时长各记各的），▶ 单独试听" +
       (aiOk ? "\n👁 AI看图 " + aiOk + " 个关键镜头（并发" + VLM_CONCURRENCY + "，仅用于剧本无线索处）｜模型 " + (vlModelOk || "-") : "") +
       (aiErr ? "\n⚠️ AI看图未生效（不影响剧本情绪）：" + aiErr : "");
@@ -1920,6 +2074,16 @@ document.getElementById("exportAllBtn").onclick = async function() {
       setProgress(bar, 5 + Math.round((i/n)*75), "构建段"+(i+1)+"/"+n);
     });
     if (!res || !res.buf) throw new Error("拼接失败");
+    // 用户可能手动换过曲 —— 导出即视为本集最终用曲，同步进历史（下次配别的集会避开）
+    rememberEpisode(CUR_VKEY, currentPicks());
+    if (window.__dedupRefresh) window.__dedupRefresh();
+    // 手动换曲可能让两段共用同一首，导出前给个明确提示（不阻断）
+    var dupNote = (function () {
+      var seen = {}, dup = [];
+      currentPicks().forEach(function (f) { if (seen[f]) dup.push(f); seen[f] = 1; });
+      return dup.length ? ("\n⚠️ 有 " + dup.length + " 首曲子被多个乐段共用：" +
+        dup.map(function (f) { return f.replace(/\.[^.]+$/, "").slice(0, 20); }).join(" / ")) : "";
+    })();
     var beforeDur = res.rawDur;
     var aligned = res.buf;
     var blob, ext;
@@ -1943,13 +2107,13 @@ document.getElementById("exportAllBtn").onclick = async function() {
       await w2.write(blob); await w2.close();
       st.textContent = "✅ 已导出到 " + OUT_DIR.name + "/" + fname +
         "\n时长: " + aligned.duration.toFixed(2) + "s（视频" + STATE.duration.toFixed(2) + "s）" +
-        "\n拼接前" + beforeDur.toFixed(2) + "s" + alignNote + cutNote + gapNote;
+        "\n拼接前" + beforeDur.toFixed(2) + "s" + alignNote + cutNote + gapNote + dupNote;
     } else {
       var a = document.createElement("a");
       a.href = URL.createObjectURL(blob); a.download = fname; a.click();
       st.textContent = "✅ 已导出 " + fname +
         "\n时长: " + aligned.duration.toFixed(2) + "s（视频" + STATE.duration.toFixed(2) + "s）" +
-        "\n拼接前" + beforeDur.toFixed(2) + "s" + alignNote + cutNote + gapNote;
+        "\n拼接前" + beforeDur.toFixed(2) + "s" + alignNote + cutNote + gapNote + dupNote;
     }
     setProgress(bar, 100, "完成");
   } catch(e) {
