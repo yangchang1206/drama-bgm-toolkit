@@ -43,6 +43,10 @@ DEFAULT_DIMS = 1024
 MAX_BATCH = 10
 VOCAL_FLAGS = {"是", "疑似", "yes"}
 
+# 复用同一套 mood 解析（"中速/中能量/暗沉" → spd/eng/ton），避免两处规则漂移
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from augment_index_meta import parse_mood  # noqa: E402
+
 
 def parse_args():
     ap = argparse.ArgumentParser(description="构建 web/index.html 用的向量索引")
@@ -66,7 +70,8 @@ def parse_args():
 
 
 def load_rows(db_path, exclude_unknown):
-    """从 songs 表取曲目。返回 [(id, filename, subdir, mood, has_vocals, duration)]"""
+    """从 songs 表取曲目。
+    返回 [(id, filename, subdir, mood, has_vocals, duration, bpm, rms)]"""
     import sqlite3
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -76,9 +81,9 @@ def load_rows(db_path, exclude_unknown):
         missing = need - cols
         conn.close()
         raise SystemExit("songs 表缺少字段 %s，请先跑 build_db.py 建库" % ", ".join(sorted(missing)))
-    rows = conn.execute(
-        "SELECT id, filename, subdir, mood, has_vocals, duration FROM songs ORDER BY id"
-    ).fetchall()
+    extra = [c for c in ("bpm", "rms") if c in cols]
+    sel = "id, filename, subdir, mood, has_vocals, duration" + ("".join(", " + c for c in extra))
+    rows = conn.execute("SELECT %s FROM songs ORDER BY id" % sel).fetchall()
     conn.close()
 
     out = []
@@ -88,13 +93,15 @@ def load_rows(db_path, exclude_unknown):
             continue
         if exclude_unknown and hv in ("", "unknown", "未知"):
             continue
+        bpm = r["bpm"] if "bpm" in r.keys() else None
+        rms = r["rms"] if "rms" in r.keys() else None
         out.append((r["id"], r["filename"], r["subdir"] or "", r["mood"] or "unknown",
-                    hv, r["duration"] or 0))
+                    hv, r["duration"] or 0, bpm or 0, rms or 0))
     return out
 
 
 def build_text(row, template):
-    _, filename, subdir, mood, _, _ = row
+    filename, subdir, mood = row[1], row[2], row[3]
     stem = os.path.splitext(filename)[0]
     return template.format(stem=stem, filename=filename, subdir=subdir, mood=mood)
 
@@ -194,8 +201,22 @@ def main():
             for row, vec in zip(chunk, vecs):
                 if len(vec) != args.dims:
                     raise SystemExit("维度不符：模型返回 %d 维，期望 %d 维（--dims）" % (len(vec), args.dims))
-                item = {"fn": row[1], "voc": "no", "dur": round(float(row[5]), 1),
-                        "v": quantize_int8(vec)}
+                dur = float(row[5]) if row[5] and row[5] > 0 else None
+                bpm = float(row[6]) if row[6] and row[6] > 0 else None
+                spd, eng, ton = parse_mood(row[3])
+                # 元数据是 v4 前端「四维打分」的输入；缺字段不影响加载（前端按中性值处理）
+                item = {"fn": row[1], "voc": "no"}
+                if dur:
+                    item["dur"] = round(dur, 1)
+                if bpm:
+                    item["bpm"] = round(bpm, 1)
+                if eng is not None:
+                    item["eng"] = eng
+                if spd is not None:
+                    item["spd"] = spd
+                if ton:
+                    item["ton"] = ton
+                item["v"] = quantize_int8(vec)
                 pf.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n")
                 written += 1
             pf.flush()
