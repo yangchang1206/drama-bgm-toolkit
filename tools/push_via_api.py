@@ -13,6 +13,7 @@ api.github.com 始终 200。于是绕开 git 传输层，直接用 REST 建 blob
 用法：
   python tools/push_via_api.py --repo yangchang1206/drama-bgm-toolkit --branch main \
       --message-file .git/COMMIT_EDITMSG --files web/index.html tools/smoke_dom.js ...
+  （上传前会与 HEAD 比对：仅 EOL 差异时自动按 git 规范 LF 上传，避免远端 CRLF 漂移）
 
 凭据：优先环境变量 GITHUB_TOKEN，否则从 Git Credential Manager 现取（git credential fill）。
 """
@@ -56,6 +57,26 @@ def req(method, path, token, payload=None):
     return json.loads(body) if body.strip() else {}
 
 
+def load_for_push(root, rel):
+    """读取要上传的字节：与 HEAD 的差异若仅为 EOL（CRLF↔LF），上传 HEAD 的规范 blob；否则上传工作区原样。
+
+    背景（2026-10-18 实测）：Windows 工作区 check-out 后部分文件是 CRLF，而 git 规范（索引/HEAD blob）是 LF；
+    直接按工作区字节上传会让远端 tree 与本地不一致（需要再补一次 LF 归一提交才能对齐）。
+    """
+    work = open(os.path.join(root, rel), "rb").read()
+    rel_git = rel.replace("\\", "/")
+    p = subprocess.run(["git", "-C", root, "show", "HEAD:" + rel_git], capture_output=True)
+    if p.returncode != 0:
+        return work, "(新文件·工作区原样)"
+    head = p.stdout
+    if head == work:
+        return work, ""
+    if head == work.replace(b"\r\n", b"\n"):
+        return head, "(按 git 规范 LF 归一)"
+    print("  ⚠ %s 与 HEAD 不同且非仅 EOL，按工作区原样上传 —— 请确认这是要发布的版本" % rel)
+    return work, "(工作区原样·≠HEAD)"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True, help="owner/name")
@@ -83,10 +104,10 @@ def main():
         p = os.path.join(args.root, rel)
         if not os.path.isfile(p):
             raise SystemExit("找不到文件: " + p)
-        raw = open(p, "rb").read()
+        raw, note = load_for_push(args.root, rel)
         blob = req("POST", "/repos/%s/git/blobs" % args.repo, token,
                    {"content": base64.b64encode(raw).decode("ascii"), "encoding": "base64"})
-        print("  blob %-40s %7d 字节  %s" % (rel, len(raw), blob["sha"][:7]))
+        print("  blob %-40s %7d 字节  %s  %s" % (rel, len(raw), blob["sha"][:7], note))
         entries.append({"path": rel.replace("\\", "/"), "mode": "100644", "type": "blob", "sha": blob["sha"]})
 
     tree = req("POST", "/repos/%s/git/trees" % args.repo, token,
