@@ -156,7 +156,7 @@ def main():
             print(f"  VAD {i+1}/{len(pending_v)} speed={(i+1)/el:.1f} songs/min")
 
     total = c.execute("SELECT COUNT(*) FROM songs").fetchone()[0]
-    voc = c.execute("SELECT COUNT(*) FROM songs WHERE has_vocals='yes'").fetchone()[0]
+    voc = c.execute("SELECT COUNT(*) FROM songs WHERE has_vocals IN ('yes','是')").fetchone()[0]
     emb_n = c.execute("SELECT COUNT(*) FROM clap_embeds").fetchone()[0]
     print(f"\n=== Done ===")
     print(f"Total songs: {total}")

@@ -31,8 +31,8 @@ def find_node(explicit=None):
         found = shutil.which(name)
         if found:
             return found
-    # WorkBuddy 受管运行时兜底
-    fallback = r"C:\Users\Administrator\.workbuddy\binaries\node\versions\22.22.2-6\node.exe"
+    # 本机 Node 常见安装位置兜底（原 WorkBuddy 受管运行时引用已于 2026-10-18 移除）
+    fallback = r"D:\nodejs\node.exe"
     if os.path.isfile(fallback):
         return fallback
     return None

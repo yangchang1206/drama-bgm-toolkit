@@ -102,6 +102,37 @@ def patch_load_emb(html: str) -> str:
     return html.replace(LOADEMB_ANCHOR, INLINE_GUARD, 1)
 
 
+# lamejs 的 <script src> 标签（jsdelivr CDN）——单文件/桌面版要把它换成内联
+LAME_TAG_RE = re.compile(r'<script[^>]*src="[^"]*lamejs[^"]*"[^>]*>\s*</script>\s*', re.IGNORECASE)
+
+
+def inline_lamejs(html: str, lamejs_path: str) -> str:
+    """把 CDN 上的 lamejs 换成内联副本（离线也能导出 MP3）。
+
+    为什么必须内联：单文件版的定位是「双击即用、离线可用」，而 MP3 编码靠 lamejs；
+    原来它从 jsdelivr CDN 加载 ⇒ 断网/CDN 被墙时，导 MP3 必失败（WAV 不受影响，因为是自己写的编码器）。
+    WAV 路径完全不依赖它，所以内联只影响体积（+156 KB），不改变任何行为。
+    """
+    with open(lamejs_path, "r", encoding="utf-8") as f:
+        code = f.read()
+    if "Mp3Encoder" not in code:
+        raise SystemExit(f"[FAIL] {lamejs_path} 里找不到 Mp3Encoder，可能下错了文件（要 lame.min.js）。")
+    # 代码里若出现 </script 会被 HTML 解析器当成脚本结束标签（<\/script 在 JS 字符串里等价）
+    code = code.replace("</script", "<\\/script")
+    m = LAME_TAG_RE.search(html)
+    if not m:
+        raise SystemExit("[FAIL] 未找到 lamejs 的 <script src> 标签，无法替换为内联版本。\n"
+                         "       源文件是否已被改过？（脚本要求 --html 指向未改造过的 web/index.html）")
+    inline_tag = (
+        '<script id="lamejsInline">\n'
+        '/* lamejs 1.2.1 内联副本：原为 <script src> 指向 jsdelivr CDN，断网即无法导出 MP3。\n'
+        '   由 tools/build_single_file.py --lamejs 注入，勿手改（要改请改 vendor/lame.min.js）。 */\n'
+        f'{code}\n'
+        '</script>\n'
+    )
+    return html[:m.start()] + inline_tag + html[m.end():]
+
+
 def inject_data_script(html: str, data_script: str) -> str:
     """把数据 <script> 插到「主脚本」之前（保证 loadEmb() 调用时已就绪）。"""
     key = "var EMB = [], SONG_MAP = {}, OUT_DIR = null;"
@@ -122,10 +153,16 @@ def main() -> int:
     ap.add_argument("--mode", choices=["inline", "sidecar"], default="inline",
                     help="inline=索引内联进 HTML（单文件）；sidecar=另存 embeddings.js 并用 <script src> 引用")
     ap.add_argument("--sidecar-name", default="embeddings.js", help="sidecar 模式下的 JS 文件名")
+    ap.add_argument("--lamejs", default=None,
+                    help="lame.min.js 路径：给定时把它内联进产物（替代 CDN 的 <script src>），"
+                         "断网也能导 MP3。推荐 vendor/lame.min.js")
     args = ap.parse_args()
 
     print("[1/4] 读取源文件 ...")
     html = load_html(args.html)
+    if args.lamejs:
+        html = inline_lamejs(html, args.lamejs)
+        print(f"      lamejs     : 已内联（{os.path.getsize(args.lamejs):,} 字节，替代 CDN <script src>）")
     with open(args.emb, "r", encoding="utf-8") as f:
         raw_json = f.read()
     print(f"      index.html : {len(html):,} 字符")
@@ -179,7 +216,10 @@ def main() -> int:
     size = os.path.getsize(args.out)
     print("[4/4] 完成 ✓")
     print(f"      输出     : {args.out}（{size:,} 字节 / {size/1048576:.2f} MB）{extra}")
-    print("      说明     : 双击即可用，无需本地服务器；选曲仍需联网 + DashScope API Key。")
+    note = "双击即可用，无需本地服务器；选曲仍需联网 + DashScope API Key。"
+    if args.lamejs:
+        note += " lamejs 已内联 ⇒ 断网也能导 MP3（WAV 本来就不依赖）。"
+    print(f"      说明     : {note}")
     return 0
 
 

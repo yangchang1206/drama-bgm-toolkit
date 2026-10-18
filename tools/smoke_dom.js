@@ -187,6 +187,59 @@ async function getJson(url) {
     ok("关掉开关后不再排除任何曲目", dedup.after && dedup.after.noHist === true);
     ok("控件交互全程无异常", !dedup.err, dedup.err);
 
+    console.log("【S5 单曲导出（④ 面板按钮 + 候选行每行一个 💾）】");
+    const solo = await evaluate(`(function(){
+      var out = {};
+      try {
+        var s = STATE.segments[0];
+        out.panelBtn = !!document.getElementById("segExportBtn");
+        out.wired = typeof document.getElementById("segExportBtn").onclick === "function";
+        out.rowBtns = document.querySelectorAll("#cands .mini-export").length;
+        // 无头下没有曲库文件：把解码桩成一段 30s 素材，其余真跑（真拼接 + 真 WAV 打包）
+        window.__oldDecode = decodeAudioFile;
+        decodeAudioFile = function(){ return Promise.resolve(getCtx().createBuffer(1, Math.round(44100*30), 44100)); };
+        // 拦掉真实下载动作，只留下 a.download 的文件名供断言
+        window.__oldCreateURL = URL.createObjectURL;
+        URL.createObjectURL = function(){ return "blob:smoke"; };
+        window.__oldClick = HTMLAnchorElement.prototype.click;
+        HTMLAnchorElement.prototype.click = function(){ window.__dl = this.download; };
+        EXPORT_FMT = "wav"; OUT_DIR = null;
+        s.track = 0;                       // 先把选中拨回第 1 首，验证「导别的行不动选中」
+        return exportOneSegment(s, 1).then(function(){
+          return { panelBtn: out.panelBtn, wired: out.wired, rowBtns: out.rowBtns,
+                   status: (document.getElementById("status")||{}).textContent || "",
+                   track: s.track,
+                   rowDisabled: document.getElementById("expbtn-1").disabled,
+                   panelText: (document.getElementById("segExportBtn")||{}).textContent || "",
+                   dl: window.__dl };
+        }).catch(function(e){ return { err: e.message, panelBtn: out.panelBtn, wired: out.wired, rowBtns: out.rowBtns }; });
+      } catch (e) { return { err: e.message, panelBtn: out.panelBtn, wired: out.wired, rowBtns: out.rowBtns }; }
+    })()`);
+    ok("④ 面板有「单独导出这首」按钮且已绑定", solo.panelBtn === true && solo.wired === true, JSON.stringify(solo).slice(0, 120));
+    ok("每行候选曲各有一个 💾（2 首 → 2 个）", solo.rowBtns === 2, solo.rowBtns);
+    ok("点行上 💾 真走通导出（真拼接 + 真打 WAV）", !solo.err && /单曲导出 \[1\] b\.mp3/.test(solo.status || ""), solo.err || (solo.status || "").split("\n")[0]);
+    ok("用的是那一首自己的裁剪（12s）", /时长 12\.\d\ds/.test(solo.status || ""), (solo.status || "").split("\n")[2]);
+    ok("导出不改用户选中（仍停在 [0]）", solo.track === 0, solo.track);
+    ok("文件名 = BGM_seg<段号>_<曲名>.wav", /BGM_seg48-1·1_b\.wav/.test(solo.status || ""), (solo.status || "").split("\n")[1]);
+    ok("导出后按钮恢复可用、面板文案还原", solo.rowDisabled === false && /单独导出这首/.test(solo.panelText || ""), solo.rowDisabled + " / " + solo.panelText);
+    ok("触发的是下载动作且文件名正确", /^BGM_seg.*_b\.wav$/.test(solo.dl || ""), solo.dl);
+
+    console.log("【S6 MP3 导出（lamejs 编码器）】");
+    const mp3 = await evaluate(`(function(){
+      try {
+        var s = STATE.segments[0];
+        EXPORT_FMT = "mp3";
+        return exportOneSegment(s, 0).then(function(){
+          return { lame: (typeof lamejs === "function" && typeof lamejs.Mp3Encoder === "function"),
+                   status: (document.getElementById("status")||{}).textContent || "",
+                   dl: window.__dl };
+        }).catch(function(e){ return { err: e.message, lame: (typeof lamejs) }; });
+      } catch (e) { return { err: e.message, lame: (typeof lamejs) }; }
+    })()`);
+    ok("lamejs 可用（lamejs.Mp3Encoder 是函数）", mp3.lame === true, JSON.stringify(mp3).slice(0, 90));
+    ok("MP3 导出真跑通（真编码不是走过场）", !mp3.err && /单曲导出 \[0\] a\.mp3/.test(mp3.status || ""), mp3.err || (mp3.status || "").split("\n")[0]);
+    ok("落下的文件名是 .mp3", /\.mp3$/.test(mp3.dl || ""), mp3.dl);
+
     await sleep(300);
     console.log("\n" + "=".repeat(46));
     if (errors.length) { console.log("页面错误共 " + errors.length + " 条："); errors.slice(0, 8).forEach((e) => console.log("  ! " + e)); }

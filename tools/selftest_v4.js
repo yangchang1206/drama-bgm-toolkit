@@ -562,6 +562,50 @@ section("T13 跨集去重 + 音效过滤 + 艺人打散");
   ok("shortErr 把整段归因压成一句话", se.length <= 71 && /^Failed to fetch/.test(se), se);
 }
 
+// ================= T15 单曲导出（右侧 ④ 面板：候选行的 💾 + 面板按钮）=================
+section("T15 单曲导出：候选里任意一首都能单独导 + 文件名清洗");
+{
+  const SR = 8000;
+  const makeSrc = () => { const b = new FakeAudioBuffer(1, Math.round(60 * SR), SR);
+    const d = b.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = 1; return b; };
+  G.SONG_MAP = { "a.mp3": { k: "a" }, "b.mp3": { k: "b" } };
+  G.decodeAudioFile = async () => makeSrc();
+  G.FE_MIN = 1.5; G.FE_MAX = 4.0;
+
+  const seg = { id: "第1段", timeStart: 0, timeEnd: 20, dur: 20, track: 0,
+                candidates: [{ fn: "a.mp3" }, { fn: "b.mp3", srcStart: 5, srcDur: 12 }],
+                shotCount: 5, wantBpm: 100, eng: 0.5 };
+
+  // 1) 单段仍走唯一渲染入口 renderBGM：时长 = 那首的裁剪时长，且标「单段无交叉」
+  const cut = G.candCut(seg.candidates[1], seg);
+  let D = parseFloat(cut.dur); if (!(D > 0)) D = (seg.timeEnd - seg.timeStart) || 10; D = Math.max(0.5, D);
+  const r = await G.renderBGM([seg], D);
+  ok("单段导出时长 = 那首的裁剪时长 12s", r && near(r.buf.duration, 12, 1e-3), r && r.buf.duration.toFixed(3));
+  ok("单段无交叉（feNote 标注）", /单段无交叉/.test(r.feNote), r.feNote);
+  ok("单段落点从 0s 起", r.starts.length === 1 && near(r.starts[0], 0, 1e-9), JSON.stringify(r.starts));
+
+  // 2) 端到端：当前选中 [0]，却去导 [1] —— 必须用 [1] 自己的裁剪，且不能改用户的选中
+  G.EXPORT_FMT = "wav";
+  G.OUT_DIR = null;
+  seg.track = 0;
+  await G.exportOneSegment(seg, 1);
+  const st = G.document.getElementById("status").textContent;
+  ok("导出候选[1]，状态里写的是第 2 首", /单曲导出 \[1\] b\.mp3/.test(st), st.split("\n")[0]);
+  ok("用的是那一首自己的裁剪（12s）", /时长 12\.\d\ds/.test(st), st.split("\n")[2] || "");
+  ok("导出后不改用户的选中（仍是 [0]）", seg.track === 0, "track=" + seg.track);
+  ok("文件名 = BGM_seg<段号>_<曲名>.wav", /BGM_seg第1段_b\.wav/.test(st), st.split("\n")[1]);
+  ok("导出结束恢复按钮可用", G.document.getElementById("expbtn-1").disabled === false);
+
+  // 3) 文件名清洗：Windows 非法字符 / 空白 / 超长 / 缺段号与曲名
+  const n1 = G.segExportName({ id: "1:2" }, { fn: "夜曲 (feat. A/B).wav" }, "mp3");
+  ok("非法字符与空白全换成下划线", !/[\\\/:*?"<>|\s]/.test(n1), n1);
+  ok("扩展名跟随传入的导出格式", /\.mp3$/.test(n1), n1);
+  const n2 = G.segExportName({ id: "" }, { fn: "" }, "wav");
+  ok("缺段号/缺曲名也有兜底名", /^BGM_seg[a-z]+_song\.wav$/.test(n2), n2);
+  const n3 = G.segExportName({ id: "1" }, { fn: "长".repeat(60) + ".mp3" }, "wav");
+  ok("超长曲名被截断（整名 ≤55 字符）", n3.length <= 55, n3.length + " 字符 → " + n3);
+}
+
 // ================= 汇总 =================
 console.log("\n" + "=".repeat(52));
 console.log("通过 " + pass + " 项，失败 " + fail + " 项");

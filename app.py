@@ -72,7 +72,7 @@ def search_music(query, top_n=10, no_vocal=True):
     sql = """SELECT s.id, s.filename, s.fullpath, s.bpm, s.duration, e.embed
              FROM songs s JOIN clap_embeds e ON s.id=e.song_id WHERE 1=1"""
     if no_vocal:
-        sql += " AND s.has_vocals='no'"
+        sql += " AND s.has_vocals IN ('no','否')"
     rows = conn.execute(sql).fetchall()
     conn.close()
     scores = []
@@ -345,7 +345,7 @@ with gr.Blocks(title="BGM工作台", css=CUSTOM_CSS) as demo:
             try:
                 conn = sqlite3.connect(db)
                 total = conn.execute("SELECT COUNT(*) FROM songs").fetchone()[0]
-                inst = conn.execute("SELECT COUNT(*) FROM songs WHERE has_vocals='no'").fetchone()[0]
+                inst = conn.execute("SELECT COUNT(*) FROM songs WHERE has_vocals IN ('no','否')").fetchone()[0]
                 conn.close()
                 return f"当前库: {root}\n歌曲: {total} 首（纯器乐 {inst}）"
             except Exception as e:

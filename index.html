@@ -5,184 +5,347 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>BGM工作台 v5.1</title>
+<title>BGM工作台 v5.3</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
 <style>
+/* ============================================================
+   v5.3 UI：顶栏（步骤 + 状态 + 设置抽屉） / 左输入 / 中结果 / 右详情·导出
+   约定：DOM id 与测试钩子（.seg / .song / .mini-play / .mini-export /
+   .cut-badge / #st / #dur / #cutNote / #segExportBtn / #expbtn-N …）保持不变
+   ============================================================ */
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background: #f5f6fa; color: #222; }
-h1 { text-align: center; padding: 14px; font-size: 20px; }
-.ver { text-align:center; font-size:11px; color:#999; margin-bottom:6px; }
-.sub { text-align: center; color: #888; font-size: 12px; margin-bottom: 12px; }
-#globalErr { display:none; background:#dc2626; color:#fff; padding:10px 16px; font-size:12px; margin:0 16px 10px; border-radius:6px; white-space:pre-wrap; font-family:Consolas,monospace; }
-#readyBar { background:#fef3c7; color:#92400e; padding:8px 16px; font-size:12px; margin:0 16px 10px; border-radius:6px; }
-.row { display: grid; grid-template-columns: 1fr 1.2fr 1.2fr; gap: 10px; padding: 0 16px 12px; }
-.col { background: #fff; border-radius: 8px; padding: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
-.col h3 { font-size: 14px; margin-bottom: 8px; }
-textarea, input, select { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
-textarea { min-height: 160px; resize: vertical; }
-button { padding: 8px 14px; border: none; border-radius: 4px; background: #4f46e5; color: #fff; cursor: pointer; font-size: 13px; margin-top: 8px; margin-right: 6px; }
-button:hover:not(:disabled) { background: #4338ca; }
-button:disabled { background: #ccc; cursor: not-allowed; }
-button.secondary { background: #6b7280; }
-button.green { background: #059669; }
-button.teal { background: #0d9488; }
-button.purple { background: #7c3aed; }
-.seg { padding: 8px; border: 1px solid #e5e7eb; border-radius: 4px; margin-bottom: 6px; cursor: pointer; font-size: 12px; }
-.seg:hover { background: #f3f4f6; }
-.seg.active { border-color: #4f46e5; background: #eef2ff; }
-.mood { display: inline-block; background: #e0e7ff; color: #4338ca; padding: 1px 6px; border-radius: 3px; font-size: 11px; margin-left: 4px; }
-.status { font-size: 12px; color: #666; margin-top: 8px; white-space: pre-wrap; }
-.status.err { color: #dc2626; background: #fef2f2; padding: 6px; border-radius: 4px; }
-.song { font-size: 12px; padding: 4px; background: #f9fafb; border-radius: 3px; margin-bottom: 3px; cursor: pointer; word-break: break-all; }
-.song.sel { background: #dbeafe; }
-.fileinfo { font-size: 12px; color: #059669; margin-top: 4px; }
-.banner { background: #fef3c7; padding: 8px; border-radius: 4px; font-size: 11px; margin-bottom: 8px; color: #92400e; }
-.player { margin-top: 10px; padding: 10px; background: #f9fafb; border-radius: 6px; }
-.player .time { display: flex; justify-content: space-between; font-size: 11px; color: #666; margin-top: 4px; }
-input[type=range] { width: 100%; margin-top: 6px; }
-.pbar-wrap { margin-top: 10px; background: #e5e7eb; border-radius: 6px; overflow: hidden; height: 18px; display:none; }
-.pbar { height: 100%; background: linear-gradient(90deg,#4f46e5,#7c3aed); color:#fff; font-size:11px; line-height:18px; text-align:center; transition: width .3s; white-space:nowrap; }
-.musiclib { max-height: 200px; overflow-y: auto; margin-top: 8px; }
-.api-box { background:#fff; border-radius:8px; padding:10px 16px; margin:0 16px 10px; display:flex; gap:8px; align-items:center; box-shadow:0 1px 3px rgba(0,0,0,.08); flex-wrap:wrap; }
-.api-box label { font-size:12px; color:#666; white-space:nowrap; }
-.api-box input { flex:1; font-size:12px; min-width:180px; }
-.api-msg { font-size:12px; margin:6px 0 0; flex-basis:100%; white-space:pre-line; line-height:1.65; }
-.api-msg.ok { color:#059669; }
-.api-msg.err { color:#dc2626; }
-.export-btn { width:100%; padding:12px; font-size:15px; margin-top:12px; background:#059669; }
-.query-box { background:#f0f9ff; border-left:3px solid #0284c7; padding:6px 8px; margin-top:6px; font-size:11px; color:#075985; word-break: break-all; }
-.fmt-row { display:flex; gap:8px; align-items:center; margin-top:10px; }
-.fmt-row label { font-size:12px; color:#666; white-space:nowrap; }
-.fmt-btns { display:flex; gap:8px; flex:1; }
-.fmt-btn { flex:1; padding:8px; border:2px solid #ddd; background:#f9fafb; color:#666; border-radius:6px; cursor:pointer; font-size:13px; margin-top:0; }
-.fmt-btn.on { border-color:#4f46e5; background:#eef2ff; color:#4338ca; font-weight:bold; }
-.tp-row { margin-top:8px; font-size:12px; color:#666; }
-.tp-row input { margin-top:4px; font-family:Consolas,monospace; font-size:12px; }
-.video-info { font-size:12px; color:#059669; margin-top:4px; }
-.detect-box { margin-top:6px; padding:8px; background:#f5f3ff; border-radius:6px; font-size:12px; }
-.merge-info { font-size:11px; color:#6b21a8; margin-top:4px; }
-.ai-tag { display:inline-block; background:#dcfce7; color:#15803d; padding:1px 6px; border-radius:3px; font-size:10px; margin-left:4px; }
-.merge-tag { display:inline-block; background:#fce7f3; color:#be185d; padding:1px 6px; border-radius:3px; font-size:10px; margin-left:4px; }
-.loading-hint { color:#0284c7; font-size:11px; margin-left:6px; }
-.scan-progress { font-size:11px; color:#0284c7; margin-top:4px; }
-/* 镜头时间轴：上层按每格宽度∝镜头时长，下层是乐段条（红竖线=换曲点） */
-.tl-wrap { position:relative; margin-top:6px; }
-.tl-track { display:flex; height:30px; border-radius:4px; overflow:hidden; border:1px solid #e5e7eb; background:#f9fafb; }
-.tl-shot { position:relative; height:100%; border-right:1px solid rgba(255,255,255,.7); min-width:1px; }
-.tl-shot b { position:absolute; left:2px; top:2px; font-size:9px; font-weight:600; color:rgba(0,0,0,.6); }
-.tl-segs { position:relative; height:14px; margin-top:2px; border-radius:3px; background:#f1f5f9; overflow:hidden; }
-.tl-seg { position:absolute; top:0; height:100%; border-right:2px solid #dc2626; display:flex; align-items:center; }
-.tl-seg em { font-size:9px; font-style:normal; color:#1e293b; padding-left:3px; overflow:hidden; white-space:nowrap; }
-.tl-axis { display:flex; justify-content:space-between; font-size:10px; color:#94a3b8; margin-top:2px; }
-.tl-legend { font-size:10px; color:#666; margin-top:5px; display:flex; gap:9px; flex-wrap:wrap; }
-.tl-legend i { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:3px; vertical-align:middle; }
-.tl-head { font-size:11px; color:#334155; margin-top:6px; font-weight:600; }
-.src-tag { display:inline-block; background:#e2e8f0; color:#475569; padding:1px 5px; border-radius:3px; font-size:10px; margin-left:4px; }
-.src-tag.ai { background:#dcfce7; color:#15803d; }
-.src-tag.rule { background:#fef3c7; color:#92400e; }
-.src-tag.carry { background:#e0e7ff; color:#4338ca; }
-.src-tag.def { background:#f1f5f9; color:#64748b; }
-/* 候选曲裁剪（每首各自独立） */
-.cut-box { margin-top:8px; padding:6px 8px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:5px; font-size:11px; color:#475569; }
-.cut-badge { display:inline-block; background:#ede9fe; color:#6d28d9; padding:0 4px; border-radius:3px; font-size:10px; }
-.mini-play { float:right; padding:0 6px; font-size:10px; background:#0ea5e9; border:none; color:#fff; border-radius:3px; cursor:pointer; }
-.mini-play:hover { background:#0284c7; }
-.fit-note { font-size:10px; color:#64748b; margin-top:2px; }
-.dedup-row { margin-top:8px; padding:6px 8px; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:6px;
-  font-size:11px; color:#166534; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-.dedup-row label { display:flex; align-items:center; gap:4px; cursor:pointer; }
-.dedup-row .mini-btn { padding:2px 7px; font-size:10px; background:#fff; border:1px solid #86efac; color:#166534;
-  border-radius:4px; cursor:pointer; }
-.dedup-row .mini-btn:hover { background:#dcfce7; }
-.dedup-row .hist-info { color:#15803d; font-size:10px; }
-.dedup-row.off { background:#f8fafc; border-color:#e2e8f0; color:#64748b; }
-.dedup-row.off .mini-btn { border-color:#cbd5e1; color:#475569; }
-@media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
+html, body { height: 100%; }
+body { font: 13px/1.5 -apple-system, "Microsoft YaHei", "Segoe UI", sans-serif; color: #1f2937;
+       background: #eef2f7; display: flex; flex-direction: column; overflow: hidden; }
+
+/* ---------- 顶栏 ---------- */
+.topbar { flex: 0 0 58px; height: 58px; background: #fff; border-bottom: 1px solid #e2e8f0; position: relative; z-index: 30;
+          display: flex; align-items: center; gap: 14px; padding: 0 16px; box-shadow: 0 1px 3px rgba(15,23,42,.06); }
+.logo { font-size: 16px; font-weight: 700; white-space: nowrap; cursor: default; }
+.logo .ver { font-size: 11px; color: #94a3b8; font-weight: 400; margin-left: 4px; }
+.steps { display: flex; align-items: center; gap: 8px; }
+.step { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #64748b; white-space: nowrap;
+        background: #f1f5f9; border-radius: 999px; padding: 4px 11px; }
+.step .n { width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center;
+           font-size: 10px; font-weight: 700; background: #cbd5e1; color: #fff; }
+.step.done { color: #15803d; background: #dcfce7; } .step.done .n { background: #22c55e; }
+.step.now { color: #1d4ed8; background: #dbeafe; font-weight: 600; box-shadow: inset 0 0 0 1px #bfdbfe; }
+.step.now .n { background: #2563eb; }
+.spacer { flex: 1; }
+.chip { font-size: 12px; padding: 4px 11px; border-radius: 999px; background: #f1f5f9; color: #64748b; white-space: nowrap; }
+.chip.ok { background: #dcfce7; color: #15803d; }
+.chip.warn { background: #fef3c7; color: #b45309; }
+.btn-ghost { font-size: 12px; padding: 6px 12px; border-radius: 8px; border: 1px solid #cbd5e1;
+             background: #fff; color: #334155; cursor: pointer; }
+.btn-ghost:hover { background: #f8fafc; }
+
+/* 设置抽屉：Key / 接口地址 / 看图模型 都收在这里 */
+.setpanel { position: absolute; right: 16px; top: 56px; width: 660px; max-width: calc(100vw - 32px);
+            background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 6px 16px 12px;
+            box-shadow: 0 14px 34px rgba(15,23,42,.18); display: none; z-index: 40; }
+.setpanel.open { display: block; }
+.api-box { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 9px 0; }
+.api-box + .api-box { border-top: 1px dashed #e2e8f0; }
+.api-box label { font-size: 12px; color: #64748b; white-space: nowrap; }
+.api-box input { flex: 1; min-width: 200px; }
+.api-msg { font-size: 12px; flex-basis: 100%; white-space: pre-line; line-height: 1.65; }
+.api-msg.ok { color: #059669; } .api-msg.err { color: #dc2626; }
+
+#globalErr { display: none; background: #fee2e2; color: #991b1b; padding: 8px 16px; font-size: 12px; }
+#readyBar { flex: 0 0 auto; background: #fef3c7; color: #92400e; padding: 7px 16px; font-size: 12px; }
+
+/* ---------- 三栏 ---------- */
+.main { flex: 1; display: grid; grid-template-columns: 1.02fr 1fr 1.12fr; gap: 14px; padding: 14px; min-height: 0; }
+.col { display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+.col.scroll { overflow-y: auto; }
+/* 右栏：④ 段详情自己在卡片里滚，导出卡常驻底部（导出按钮不用滚着找） */
+.col.right > .card.detail { flex: 1; min-height: 0; overflow-y: auto; }
+.card { background: #fff; border-radius: 12px; box-shadow: 0 1px 3px rgba(15,23,42,.07); padding: 14px; }
+.card > h3 { font-size: 14px; font-weight: 700; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+.card > h3 .badge { font-size: 11px; font-weight: 500; color: #64748b; background: #f1f5f9; border-radius: 999px; padding: 2px 9px; }
+.hint { font-size: 12px; color: #64748b; }
+.row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.box { border: 1px solid #e2e8f0; border-radius: 9px; padding: 9px 10px; background: #fbfdff; }
+.box.dashed { border-style: dashed; background: #fff; }
+.pickline { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.scripthead { font-size: 11px; color: #94a3b8; margin-bottom: 6px; }
+/* 主按钮常驻左栏底部：内容短时贴底，内容长时吸在可视区底部（不用滚到底找按钮） */
+.stickyfoot { position: sticky; bottom: 0; margin-top: auto; padding: 10px 0 2px;
+              background: linear-gradient(180deg, rgba(238,242,247,0), #eef2f7 42%); }
+.sum { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: #475569;
+       background: #f8fafc; border-radius: 9px; padding: 8px 11px; margin-bottom: 10px; }
+.sum b { color: #0f172a; }
+
+/* ---------- 基础控件 ---------- */
+button { font-family: inherit; font-size: 13px; padding: 7px 13px; border: none; border-radius: 8px;
+         background: #eef2f7; color: #334155; cursor: pointer; }
+button:hover { filter: brightness(.97); }
+button:disabled { opacity: .55; cursor: not-allowed; }
+button.primary { background: linear-gradient(180deg,#2563eb,#1d4ed8); color: #fff; }
+button.secondary { background: #fff; border: 1px solid #cbd5e1; color: #334155; }
+button.teal { background: #0d9488; color: #fff; }
+button.purple { background: #7c3aed; color: #fff; }
+button.green { background: linear-gradient(180deg,#16a34a,#15803d); color: #fff; }
+button.big { font-size: 15px; padding: 12px; width: 100%; font-weight: 600; }
+button.mini { font-size: 12px; padding: 5px 10px; }
+input[type=text], input[type=password], textarea { font-family: inherit; font-size: 12.5px; color: #1f2937;
+  border: 1px solid #cbd5e1; border-radius: 8px; padding: 7px 9px; background: #fff; width: 100%; }
+input[type=file] { font-size: 12px; color: #475569; }
+textarea { height: 200px; resize: vertical; line-height: 1.6; }
+
+/* ---------- ③ 情绪弧线：段卡片 ---------- */
+.seg { position: relative; border: 1px solid #e5eaf1; border-radius: 10px; padding: 9px 11px 9px 15px;
+       margin-bottom: 8px; cursor: pointer; background: #fff; font-size: 13px; }
+.seg:hover { border-color: #c7d7ee; }
+.seg.active { border-color: #2563eb; background: #f5f9ff; box-shadow: 0 0 0 3px rgba(37,99,235,.08); }
+.seg .mbar { position: absolute; left: 0; top: 9px; bottom: 9px; width: 4px; border-radius: 4px; background: #e2e8f0; }
+.seg .l1 { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.seg .id { font-weight: 700; }
+.seg .l2 { font-size: 11.5px; color: #64748b; margin-top: 3px; }
+.seg .l3 { font-size: 11.5px; color: #334155; margin-top: 3px; }
+.mood { display: inline-block; background: #e0e7ff; color: #4338ca; padding: 1px 7px; border-radius: 999px; font-size: 11px; }
+.src-tag { display: inline-block; background: #f1f5f9; color: #475569; padding: 1px 7px; border-radius: 999px; font-size: 10.5px; }
+.src-tag.ai { background: #dcfce7; color: #15803d; }
+.src-tag.rule { background: #fef3c7; color: #92400e; }
+.src-tag.carry { background: #e0e7ff; color: #4338ca; }
+.src-tag.def { background: #f1f5f9; color: #64748b; }
+
+/* ---------- ④ 详情：候选曲行 ---------- */
+.song { font-size: 12px; padding: 6px 9px; background: #f8fafc; border-radius: 8px; margin-bottom: 4px;
+        cursor: pointer; word-break: break-all; }
+.song.sel { background: #e0edff; }
+.cand { display: flex; align-items: center; gap: 8px; padding: 7px 9px 7px 12px; border: 1px solid #eef2f7;
+        border-radius: 9px; margin-bottom: 6px; background: #fff; position: relative; }
+.cand:hover { border-color: #d7e3f4; }
+.cand.sel { border-color: #93c5fd; background: #f0f7ff; }
+.cand::before { content: ""; position: absolute; left: 0; top: 7px; bottom: 7px; width: 3px; border-radius: 3px; background: #e2e8f0; }
+.cand.sel::before { background: #2563eb; }
+.cand .nm { flex: 1; font-size: 12.5px; overflow-wrap: anywhere; word-break: normal; }
+.cand .mt { font-size: 11px; color: #94a3b8; white-space: nowrap; }
+.mini-play { flex: none; width: 28px; height: 26px; padding: 0; font-size: 11px; background: #0ea5e9;
+             border: none; color: #fff; border-radius: 7px; cursor: pointer; }
+.mini-play:hover { background: #0284c7; }
+/* 候选行里的「单独导出这一首」——与试听并排，不切换选中就能导任意一首 */
+.mini-export { flex: none; width: 28px; height: 26px; padding: 0; font-size: 11px; background: #16a34a;
+               border: none; color: #fff; border-radius: 7px; cursor: pointer; }
+.mini-export:hover { background: #15803d; }
+.mini-export:disabled { background: #94a3b8; cursor: wait; }
+.cut-badge { display: inline-block; background: #ede9fe; color: #6d28d9; padding: 1px 6px; border-radius: 999px; font-size: 10.5px; }
+.cut-box { margin-top: 9px; padding: 9px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 9px;
+           font-size: 11.5px; color: #475569; }
+.cut-box b { color: #334155; }
+.cut-box input { width: 70px !important; padding: 4px 7px; text-align: center; }
+.query-box { background: #eff6ff; border-left: 3px solid #60a5fa; border-radius: 6px; padding: 6px 9px;
+             margin: 9px 0; font-size: 12px; color: #1e3a8a; word-break: break-all; }
+.fit-note { font-size: 11px; color: #64748b; margin-top: 3px; }
+.player { margin-top: 10px; padding: 9px 10px; background: #f8fafc; border-radius: 9px; }
+.player .time { display: flex; justify-content: space-between; font-size: 11px; color: #64748b; margin-top: 4px; }
+input[type=range] { width: 100%; margin-top: 2px; accent-color: #2563eb; }
+.loading-hint { color: #0284c7; font-size: 11px; margin-left: 6px; }
+
+/* ---------- 导出区 ---------- */
+.fmt-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.fmt-row label { font-size: 12px; color: #64748b; white-space: nowrap; }
+.fmt-btns { display: flex; border: 1px solid #cbd5e1; border-radius: 9px; overflow: hidden; }
+.fmt-btn { border: none; border-radius: 0; padding: 6px 14px; font-size: 12.5px; background: #fff; color: #475569; cursor: pointer; }
+.fmt-btn.on { background: #1d4ed8; color: #fff; font-weight: 600; }
+.pbar-wrap { margin-top: 10px; background: #e2e8f0; border-radius: 999px; overflow: hidden; height: 10px; display: none; }
+.pbar { height: 100%; width: 0%; background: linear-gradient(90deg,#22c55e,#16a34a); color: #fff;
+        font-size: 9px; line-height: 10px; text-align: center; transition: width .3s; white-space: nowrap; }
+.status { font-size: 12px; color: #475569; margin-top: 8px; white-space: pre-wrap; }
+.status.err { color: #dc2626; background: #fef2f2; padding: 8px 10px; border-radius: 8px; }
+.fileinfo { font-size: 12px; color: #059669; }
+.video-info { font-size: 12px; color: #059669; }
+.banner { background: #fef3c7; padding: 8px 10px; border-radius: 8px; font-size: 11.5px; margin-bottom: 8px; color: #92400e; }
+
+/* ---------- 曲库列表 / 扫描 ---------- */
+.musiclib { max-height: 220px; overflow-y: auto; margin-top: 8px; }
+.scan-progress { font-size: 11px; color: #0284c7; }
+.detect-box { margin-top: 10px; padding: 10px; background: #f7f5ff; border-radius: 9px; font-size: 12px; }
+.merge-info { font-size: 11px; color: #6b21a8; margin-top: 4px; }
+.tp-row { margin-top: 10px; font-size: 12px; color: #64748b; }
+.tp-row input { margin-top: 5px; font-family: Consolas, monospace; font-size: 12px; }
+.ai-tag { display: inline-block; background: #dcfce7; color: #15803d; padding: 1px 6px; border-radius: 3px; font-size: 10px; margin-left: 4px; }
+.merge-tag { display: inline-block; background: #fce7f3; color: #be185d; padding: 1px 6px; border-radius: 3px; font-size: 10px; margin-left: 4px; }
+
+/* ---------- 跨集去重 ---------- */
+.dedup-row { margin-top: 10px; padding: 7px 9px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 9px;
+  font-size: 11.5px; color: #166534; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dedup-row label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+.dedup-row .mini-btn { padding: 3px 8px; font-size: 10.5px; background: #fff; border: 1px solid #86efac; color: #166534;
+  border-radius: 6px; cursor: pointer; }
+.dedup-row .mini-btn:hover { background: #dcfce7; }
+.dedup-row .hist-info { color: #15803d; font-size: 10.5px; }
+.dedup-row.off { background: #f8fafc; border-color: #e2e8f0; color: #64748b; }
+.dedup-row.off .mini-btn { border-color: #cbd5e1; color: #475569; }
+
+/* ---------- 镜头时间轴（上层按每格宽度∝镜头时长，下层乐段条） ---------- */
+.tl-wrap { position: relative; margin-top: 6px; }
+.tl-track { display: flex; height: 30px; border-radius: 6px; overflow: hidden; border: 1px solid #e5e7eb; background: #f9fafb; }
+.tl-shot { position: relative; height: 100%; border-right: 1px solid rgba(255,255,255,.7); min-width: 1px; }
+.tl-shot b { position: absolute; left: 2px; top: 2px; font-size: 9px; font-weight: 600; color: rgba(0,0,0,.6); }
+.tl-segs { position: relative; height: 14px; margin-top: 2px; border-radius: 4px; background: #f1f5f9; overflow: hidden; }
+.tl-seg { position: absolute; top: 0; height: 100%; border-right: 2px solid #dc2626; display: flex; align-items: center; }
+.tl-seg em { font-size: 9px; font-style: normal; color: #1e293b; padding-left: 3px; overflow: hidden; white-space: nowrap; }
+.tl-axis { display: flex; justify-content: space-between; font-size: 10px; color: #94a3b8; margin-top: 2px; }
+.tl-legend { font-size: 10px; color: #64748b; margin-top: 5px; display: flex; gap: 9px; flex-wrap: wrap; }
+.tl-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 3px; vertical-align: middle; }
+.tl-head { font-size: 11px; color: #334155; margin-top: 6px; font-weight: 600; }
+
+/* ---------- ④ 面板头部 / 「现在用的是」行 ---------- */
+.dhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.dhead .id { font-size: 16px; font-weight: 700; }
+.dmeta { font-size: 12px; color: #64748b; }
+.nowrow { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 11px; border-radius: 9px; }
+.nowrow .t { font-size: 11.5px; color: #64748b; }
+.nowrow .s { font-size: 13px; font-weight: 700; color: #0f172a; word-break: break-all; }
+.nowrow .m { font-size: 11px; color: #475569; text-align: right; white-space: nowrap; }
+
+/* ---------- 窄窗口回退 ---------- */
+@media (max-width: 980px) {
+  body { overflow: auto; display: block; }
+  .main { grid-template-columns: 1fr; overflow: visible; }
+  .col.scroll { overflow: visible; }
+  .col.right > .card.detail { overflow: visible; flex: none; }
+  .stickyfoot { position: static; background: none; }
+  .topbar { height: auto; flex-wrap: wrap; padding: 8px 12px; gap: 8px; }
+  .steps { flex-wrap: wrap; }
+}
 </style>
 </head>
 <body>
-<h1>🎬 BGM 工作台</h1>
-<div class="ver">版本 v5.1 · 情绪以剧本为主 + 视频节奏控换曲 + 候选曲各自剪切 + 跨集不重复用曲</div>
-<div class="sub">选音乐库 → 上传视频+剧本 → 检测镜头 → <b>情绪以剧本为主</b>、视频节奏控换曲 → 点哪首剪哪首 → 导出MP3/WAV</div>
+
+<!-- ================= 顶栏 ================= -->
+<div class="topbar">
+  <div class="logo">🎵 BGM工作台<span class="ver" title="情绪以剧本为主 + 视频节奏控换曲 + 候选曲各自剪切 + 跨集不重复用曲">v5.3 · 桌面版</span></div>
+  <div class="steps">
+    <div class="step" id="step1"><i class="n">1</i> 选曲库</div>
+    <div class="step" id="step2"><i class="n">2</i> 剧本+视频</div>
+    <div class="step" id="step3"><i class="n">3</i> 情绪分析</div>
+    <div class="step" id="step4"><i class="n">4</i> 段详情 / 导出</div>
+  </div>
+  <div class="spacer"></div>
+  <div class="chip" id="libChip">曲库未选</div>
+  <div class="chip" id="keyChip">🔑 Key 未配置</div>
+  <button class="btn-ghost" id="setBtn">⚙ 设置</button>
+</div>
+
+<!-- ================= 设置抽屉 ================= -->
+<div class="setpanel" id="setPanel">
+  <div class="api-box">
+    <label>🔑 阿里云Key:</label>
+    <input type="password" id="apiKey" placeholder="sk-...">
+    <button id="saveKeyBtn" class="secondary">💾 保存</button>
+    <button id="testKeyBtn" class="teal">🔌 测试</button>
+    <span id="apiMsg" class="api-msg"></span>
+  </div>
+  <div class="api-box">
+    <label>🌐 接口地址:</label>
+    <input type="text" id="apiBase" placeholder="留空 = 阿里云百炼官方；第三方中转 Key 填该站完整地址（如 https://xxx.com/v1）">
+  </div>
+  <div class="api-box">
+    <label>👁 看图模型:</label>
+    <input type="text" id="vlModel" placeholder="留空 = 自动降级（qwen3.8-flash → …）">
+    <span class="hint">Key 只存本机（独立资料库），不上传</span>
+  </div>
+</div>
 
 <div id="globalErr"></div>
 <div id="readyBar">⏳ 正在初始化...</div>
 
-<div class="api-box">
-  <label>🔑 阿里云Key:</label>
-  <input type="password" id="apiKey" placeholder="sk-...">
-  <button id="saveKeyBtn" class="secondary" style="margin-top:0;">💾 保存</button>
-  <button id="testKeyBtn" class="teal" style="margin-top:0;">🔌 测试</button>
-  <span id="apiMsg" class="api-msg"></span>
-</div>
+<!-- ================= 三栏 ================= -->
+<div class="main">
 
-<div class="api-box" style="padding-top:0;">
-  <label>🌐 接口地址:</label>
-  <input type="text" id="apiBase" placeholder="留空 = 阿里云百炼官方；第三方中转 Key 填该站完整地址（如 https://xxx.com/v1）" style="flex:2;">
-  <label>👁 看图模型:</label>
-  <input type="text" id="vlModel" placeholder="留空 = 自动降级（qwen3.8-flash → …）" style="flex:1; min-width:160px;">
-</div>
+  <!-- ---------- 左：输入 ---------- -->
+  <div class="col scroll">
+    <div class="card">
+      <h3>① 音乐库文件夹 <span class="badge">本地扫描，不上传</span></h3>
+      <div class="box dashed pickline">
+        <div>
+          <div id="fileInfo" class="fileinfo">未选择</div>
+          <div class="hint">选文件夹后自动扫描音频文件</div>
+        </div>
+        <button id="pickBtn" class="primary mini">📁 选择</button>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <button id="analyzeLibBtn" class="teal" disabled>🎵 匹配向量库</button>
+        <span id="scanProgress" class="scan-progress"></span>
+      </div>
+      <div class="pbar-wrap" id="libPbarWrap"><div class="pbar" id="libPbar" style="width:0%">0%</div></div>
+      <div id="libList" class="musiclib"></div>
+    </div>
 
-<div style="padding:0 16px 10px; display:grid; grid-template-columns:1fr 1fr; gap:10px;">
-  <div class="col" style="padding:10px;">
-    <b>① 音乐库文件夹</b>
-    <div class="banner">选文件夹后自动扫描音频文件</div>
-    <button id="pickBtn">📁 选择音乐文件夹</button>
-    <button id="analyzeLibBtn" class="teal" disabled>🎵 匹配向量库</button>
-    <div id="fileInfo" class="fileinfo">未选择</div>
-    <div id="scanProgress" class="scan-progress"></div>
-    <div class="pbar-wrap" id="libPbarWrap"><div class="pbar" id="libPbar" style="width:0%">0%</div></div>
-    <div id="libList" class="musiclib"></div>
-  </div>
-  <div class="col" style="padding:10px;">
-    <b>导出位置</b>
-    <div class="banner">选BGM导出文件夹（不选则浏览器下载）</div>
-    <button id="pickOutBtn" class="secondary">📂 选择导出文件夹</button>
-    <div id="outInfo" class="fileinfo">未选（浏览器下载）</div>
-  </div>
-</div>
-
-<div class="row">
-  <div class="col">
-    <h3>② 剧本 + 视频</h3>
-    <textarea id="script" placeholder="粘贴整集剧本（含 35-1、35-2 等场号）"></textarea>
-    <input type="file" id="video" accept="video/*" style="margin-top:8px;">
-    <div id="videoInfo" class="video-info">未选视频</div>
-    <div class="detect-box">
-      <button id="detectBtn" class="purple" disabled>🎬 检测镜头切换点</button>
-      <div style="font-size:11px;color:#6b21a8;margin-top:4px;">本地抽帧+帧差，输出每个镜头的时长（不再删除短镜头）</div>
-      <div id="mergeInfo" class="merge-info"></div>
-      <div id="timeline"></div>
-    </div>
-    <div class="tp-row">
-      <label>🎯 BGM分段时间点:</label>
-      <input type="text" id="timepoints" placeholder="示例: 0-22.5, 22.5-108">
-    </div>
-    <div class="dedup-row" id="dedupRow">
-      <label><input type="checkbox" id="dedupChk"> 🔁 跨集避免重复用曲</label>
-      <button id="clearHistBtn" class="mini-btn">🗑 清空配乐记录</button>
-      <span id="histInfo" class="hist-info"></span>
-    </div>
-    <button id="analyzeBtn" disabled>🔍 剧本情绪分析 + 自动选曲（画面补充）</button>
-    <div class="fmt-row">
-      <label>导出格式:</label>
-      <div class="fmt-btns">
-        <button class="fmt-btn on" data-fmt="mp3">🎵 MP3</button>
-        <button class="fmt-btn" data-fmt="wav">📼 WAV</button>
+    <div class="card">
+      <h3>② 剧本 + 视频 <span class="badge">情绪以剧本为主</span></h3>
+      <div class="scripthead">粘贴整集剧本（含 35-1、35-2 等场号）</div>
+      <textarea id="script" placeholder="粘贴整集剧本（含 35-1、35-2 等场号）"></textarea>
+      <div class="row" style="margin-top:10px;">
+        <span class="hint">视频：</span>
+        <input type="file" id="video" accept="video/*">
+        <span id="videoInfo" class="video-info">未选视频</span>
+      </div>
+      <div class="detect-box">
+        <div class="row">
+          <button id="detectBtn" class="purple" disabled>🎬 检测镜头切换点</button>
+          <span class="hint">本地抽帧 + 帧差，保留短镜头</span>
+        </div>
+        <div id="mergeInfo" class="merge-info"></div>
+        <div id="timeline"></div>
+      </div>
+      <div class="tp-row">
+        <label>🎯 BGM分段时间点:</label>
+        <input type="text" id="timepoints" placeholder="示例: 0-22.5, 22.5-108（留空则自动分段）">
+      </div>
+      <div class="dedup-row" id="dedupRow">
+        <label><input type="checkbox" id="dedupChk"> 🔁 跨集避免重复用曲</label>
+        <button id="clearHistBtn" class="mini-btn">🗑 清空配乐记录</button>
+        <span id="histInfo" class="hist-info"></span>
       </div>
     </div>
-    <button id="exportAllBtn" class="export-btn green" disabled>💾 导出整集BGM</button>
-    <div class="pbar-wrap" id="pbarWrap"><div class="pbar" id="pbar" style="width:0%">0%</div></div>
-    <div id="status" class="status"></div>
+
+    <div class="stickyfoot">
+      <button id="analyzeBtn" class="primary big" disabled>🔍 剧本情绪分析 + 自动选曲（画面补充）</button>
+    </div>
   </div>
-  <div class="col">
-    <h3>③ 情绪弧线（合并后）</h3>
-    <div id="segList"><div style="color:#aaa;font-size:12px;">分析后显示分段</div></div>
+
+  <!-- ---------- 中：结果 ---------- -->
+  <div class="col scroll">
+    <div class="card">
+      <h3>③ 情绪弧线（合并后） <span class="badge">点段看详情</span></h3>
+      <div class="sum" id="sumRow">
+        <span><b id="sumSegs">0</b> 段</span>
+        <span>总时长 <b id="sumDur">—</b></span>
+        <span>换曲 <b id="sumCuts">0</b> 次</span>
+        <span>平均段长 <b id="sumAvg">—</b></span>
+      </div>
+      <div id="segList"><div style="color:#94a3b8;font-size:12px;">分析后显示分段</div></div>
+    </div>
   </div>
-  <div class="col">
-    <h3>④ 段详情 / 试听</h3>
-    <div id="detail"><div style="color:#aaa;font-size:12px;">点左侧段查看</div></div>
+
+  <!-- ---------- 右：详情 + 导出 ---------- -->
+  <div class="col right">
+    <div class="card detail">
+      <h3>④ 段详情 / 试听 <span class="badge">💾 导的就是这一首</span></h3>
+      <div id="detail"><div style="color:#94a3b8;font-size:12px;">点左侧段查看</div></div>
+    </div>
+
+    <div class="card">
+      <h3>💾 导出</h3>
+      <div class="row" style="justify-content:space-between;">
+        <div class="fmt-row">
+          <div class="fmt-btns">
+            <button class="fmt-btn on" data-fmt="mp3">🎵 MP3</button>
+            <button class="fmt-btn" data-fmt="wav">📼 WAV</button>
+          </div>
+        </div>
+        <button id="pickOutBtn" class="secondary mini">📂 选择导出文件夹</button>
+      </div>
+      <div class="hint" id="outInfo" style="margin-top:6px;">未选（不选则浏览器下载）</div>
+      <div style="margin-top:10px;"><button id="exportAllBtn" class="green big" disabled>💾 导出整集 BGM</button></div>
+      <div class="pbar-wrap" id="pbarWrap"><div class="pbar" id="pbar" style="width:0%">0%</div></div>
+      <div id="status" class="status"></div>
+    </div>
   </div>
 </div>
 
@@ -211,6 +374,7 @@ function storeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { MEM_ST
 var EMB = [], SONG_MAP = {}, OUT_DIR = null;
 var EMB_DIM = 0;   // 索引向量维度，加载索引时探测
 var LIB_READY = false;
+var LIB_COUNT = 0;                 // 本地扫到的音频文件数（顶栏徽章用）
 var API_KEY = storeGet("dashscope_key") || "";
 // 接口基地址：留空 = 阿里云百炼官方。用了第三方中转站的 Key 就必须改这里，否则一定 401。
 var API_BASE = storeGet("dashscope_base") || "";
@@ -462,6 +626,7 @@ document.getElementById("saveKeyBtn").onclick = function() {
     var msg = document.getElementById("apiMsg");
     msg.textContent = "✅ 已保存（Key " + API_KEY.length + " 字符｜接口 " + (API_BASE || "官方") + "｜看图模型 " + (VL_MODEL || "自动") + "）" + (storeOk() ? "" : "　⚠️ 本环境禁止持久化，仅本次会话有效");
     msg.className = "api-msg ok";
+    syncHeader();                                   // 顶栏「Key」徽章即时更新
   } catch(e) { alert("保存失败: "+e.message); }
 };
 
@@ -539,6 +704,7 @@ document.getElementById("testKeyBtn").onclick = async function() {
     if (dim !== 1024) throw new Error("接口通了，但返回维度是 " + dim + "（不是 1024）。曲库索引是 1024 维，维度不符会一首曲子都选不出来。");
     msg.textContent = "✅ 连接成功（维度 " + dim + "｜接口 " + (base || "阿里云官方") + "）";
     msg.className = "api-msg ok";
+    syncHeader();                                    // 顶栏徽章同步（未点保存时仍显示「Key 未配置」）
   } catch(e) {
     var report = "❌ " + e.message;
     var official = !base || normBase(base) === DS_OFFICIAL;
@@ -713,7 +879,9 @@ document.getElementById("analyzeLibBtn").onclick = async function() {
   lv.innerHTML = list.slice(0,50).map(function(f){return '<div class="song">🎵 '+esc(f)+'</div>';}).join("") +
     (list.length>50 ? '<div style="color:#888;font-size:11px;padding:4px;">...共'+list.length+'首</div>' : "");
   LIB_READY = true;
+  LIB_COUNT = n;
   document.getElementById("analyzeBtn").disabled = false;
+  syncHeader();                                     // 顶栏：曲库徽章 + 步骤①打勾
 };
 
 document.getElementById("pickOutBtn").onclick = async function() {
@@ -722,6 +890,61 @@ document.getElementById("pickOutBtn").onclick = async function() {
     document.getElementById("outInfo").textContent = "导出到：" + OUT_DIR.name;
   } catch(e) {}
 };
+
+// ===================== v5.3 顶栏：设置抽屉 / 状态徽章 / 步骤指示 =====================
+// 约束：这段代码要能在 selftest 的最小 DOM 桩里原样跑完 —— 只允许用
+// getElementById / className / textContent / classList / addEventListener，
+// 不许用 querySelector / closest（桩里没有），否则 122 项断言会连带崩掉。
+function setStep(id, state) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.className = "step" + (state === "done" ? " done" : state === "now" ? " now" : "");
+  // 完成态把序号换成 ✓（桩里没有 childNodes，判空跳过，保证 selftest 能原样跑）
+  if (el.childNodes && el.childNodes[0] && el.childNodes[0].textContent != null) {
+    el.childNodes[0].textContent = state === "done" ? "✓" : id.replace("step", "");
+  }
+}
+function syncHeader() {
+  var lc = document.getElementById("libChip");
+  if (lc) {
+    if (LIB_READY) { lc.textContent = "✅ 曲库 " + (LIB_COUNT || (EMB && EMB.length) || 0) + " 首"; lc.className = "chip ok"; }
+    else { lc.textContent = "曲库未选"; lc.className = "chip"; }
+  }
+  var kc = document.getElementById("keyChip");
+  if (kc) {
+    if (API_KEY) { kc.textContent = "🔑 Key 已保存"; kc.className = "chip ok"; }
+    else { kc.textContent = "🔑 Key 未配置"; kc.className = "chip warn"; }
+  }
+  var hasScript = false;
+  var sc = document.getElementById("script");
+  if (sc && sc.value) hasScript = !!sc.value.trim();
+  var hasVideo = VIDEO_DUR > 0;
+  var hasSegs = !!(STATE.segments && STATE.segments.length);
+  setStep("step1", LIB_READY ? "done" : "now");
+  setStep("step2", (hasScript && hasVideo) ? "done" : (LIB_READY ? "now" : ""));
+  setStep("step3", hasSegs ? "done" : ((hasScript || hasVideo) ? "now" : ""));
+  setStep("step4", hasSegs ? "now" : "");
+}
+document.getElementById("setBtn").onclick = function (e) {
+  if (e && e.stopPropagation) e.stopPropagation();
+  var p = document.getElementById("setPanel");
+  p.classList.toggle("open");
+  if (p.classList.contains("open")) { var k = document.getElementById("apiKey"); if (k && k.focus) k.focus(); }
+};
+// 点抽屉外面就收起（沿父链找，不用 closest —— 桩里没有）
+document.addEventListener("click", function (e) {
+  var p = document.getElementById("setPanel");
+  if (!p || !p.classList.contains("open")) return;
+  var t = e.target;
+  while (t && t !== document.body) {
+    if (t === p || t.id === "setBtn") return;
+    t = t.parentNode;
+  }
+  p.classList.remove("open");
+});
+var __scriptEl = document.getElementById("script");
+if (__scriptEl && __scriptEl.addEventListener) __scriptEl.addEventListener("input", syncHeader);
+syncHeader();
 
 // 单条嵌入 = 批量嵌入的退化情形（v4 起统一走 embedMany，见下）
 function getVec(e) { return e.v || e.q || e.vec || null; }
@@ -925,6 +1148,7 @@ document.getElementById("video").onchange = async function(e) {
   document.body.appendChild(analyzeVideoEl);
   analyzeVideoEl.src = URL.createObjectURL(f);
   await new Promise(function(r){ analyzeVideoEl.onloadedmetadata = r; });
+  syncHeader();                                     // 顶栏：步骤②（剧本+视频）状态
 };
 
 // ===================== M1 镜头检测（产出逐镜头时长）=====================
@@ -1556,16 +1780,29 @@ function renderTimeline() {
 function renderSegList() {
   var el = document.getElementById("segList");
   el.innerHTML = "";
-  if (!STATE.segments.length) { el.innerHTML = '<div style="color:#aaa;font-size:12px;">无分段</div>'; return; }
-  STATE.segments.forEach(function (s, i) {
+  var segsAll = STATE.segments || [];
+  // ③ 顶上的摘要条：段数 / 总时长 / 换曲次数 / 平均段长
+  var total = segsAll.length ? (segsAll[segsAll.length-1].timeEnd - segsAll[0].timeStart) : 0;
+  var cuts = 0;
+  for (var k = 1; k < segsAll.length; k++) { if (segsAll[k].track !== segsAll[k-1].track) cuts++; }
+  var setSum = function (id, v) { var n = document.getElementById(id); if (n) n.textContent = v; };
+  setSum("sumSegs", String(segsAll.length));
+  setSum("sumDur", segsAll.length ? total.toFixed(1) + "s" : "—");
+  setSum("sumCuts", String(cuts));
+  setSum("sumAvg", segsAll.length ? (total/segsAll.length).toFixed(1) + "s" : "—");
+  if (!segsAll.length) { el.innerHTML = '<div style="color:#94a3b8;font-size:12px;">无分段</div>'; return; }
+  segsAll.forEach(function (s, i) {
     var d = document.createElement("div");
     d.className = "seg" + (i===STATE.cur?" active":"");
     var songName = (s.candidates && s.candidates[s.track]) ? s.candidates[s.track].fn : "无候选";
-    d.innerHTML = "<b>"+esc(s.id)+"</b> <span class='mood'>"+esc(s.mood)+"</span>"+
-      "<span class='src-tag "+srcTagCls(s.source)+"'>"+esc(s.source||"-")+"</span>"+
-      "<br><span style='color:#666;font-size:11px;'>"+(s.timeStart||0).toFixed(1)+"-"+(s.timeEnd||0).toFixed(1)+"s"+
-      " · "+(s.timeEnd-s.timeStart).toFixed(1)+"s · "+s.shotCount+"镜头 · 目标"+Math.round(s.wantBpm)+"BPM</span>"+
-      "<br><span style='color:#888;font-size:11px;'>🎵 "+esc(songName.slice(0,30))+"</span>";
+    d.innerHTML =
+      "<i class='mbar' style='background:"+moodColor(s.mood)+"'></i>"+
+      "<div class='l1'><span class='id'>"+esc(s.id)+"</span>"+
+      "<span class='mood'>"+esc(s.mood)+"</span>"+
+      "<span class='src-tag "+srcTagCls(s.source)+"'>"+esc(s.source||"-")+"</span></div>"+
+      "<div class='l2'>"+(s.timeStart||0).toFixed(1)+" – "+(s.timeEnd||0).toFixed(1)+"s · "+(s.timeEnd-s.timeStart).toFixed(1)+
+      "s · "+s.shotCount+" 镜头 · 目标 "+Math.round(s.wantBpm)+"BPM</div>"+
+      "<div class='l3'>🎵 "+esc(songName.slice(0,30))+"</div>";
     d.onclick = function() { STATE.cur = i; stopPreview(); renderSegList(); renderDetail(); };
     el.appendChild(d);
   });
@@ -1589,42 +1826,50 @@ async function renderDetail() {
       " ｜ BPM适配 " + (c.fBpm != null ? c.fBpm.toFixed(2) : "-");
   };
   var cut = candCut(cand, s);
-  el.innerHTML = "<b>段 "+esc(s.id)+"</b> <span class='mood'>"+esc(s.mood)+"</span> "+tags.join("")+
-    "<br><span style='color:#666;font-size:11px;'>"+(s.timeStart||0).toFixed(1)+"s - "+(s.timeEnd||0).toFixed(1)+"s"+
-    "（"+(s.timeEnd-s.timeStart).toFixed(1)+"s / ASL "+s.asl.toFixed(2)+"s / 目标 "+Math.round(s.wantBpm)+"BPM / 能量 "+s.eng.toFixed(2)+"）</span>"+
-    "<div class='query-box'>🔍 "+esc(s.query||"")+"</div>"+
+  el.innerHTML =
+    "<div class='dhead'><span class='id'>段 "+esc(s.id)+"</span>"+
+    "<span class='mood'>"+esc(s.mood)+"</span>"+tags.join("")+"</div>"+
+    "<div class='dmeta'>"+(s.timeStart||0).toFixed(1)+" – "+(s.timeEnd||0).toFixed(1)+"s（"+(s.timeEnd-s.timeStart).toFixed(1)+
+    "s / ASL "+s.asl.toFixed(2)+"s / 目标 "+Math.round(s.wantBpm)+"BPM / 能量 "+s.eng.toFixed(2)+"）</div>"+
+    "<div class='query-box'>🔎 "+esc(s.query||"")+"</div>"+
     ((s.avoided && (s.avoided.hist || s.avoided.ep))
       ? "<div class='fit-note' style='color:#15803d;'>🔁 候选已避开 "+
         (s.avoided.hist ? (s.avoided.hist+" 首往集用过的") : "")+
         ((s.avoided.hist && s.avoided.ep) ? " + " : "")+
         (s.avoided.ep ? (s.avoided.ep+" 首本集已选的") : "")+"</div>"
       : "")+
-    "<div class='song sel'>现在用的是：["+s.track+"] "+esc(cand.fn)+"</div>"+
-    "<div class='fit-note'>"+fitOf(cand)+" ｜ 情绪余弦 "+(cand.sim||0).toFixed(3)+"</div>"+
+    "<div class='song sel nowrow'><div><div class='t'>现在用的是</div>"+
+    "<div class='s'>["+s.track+"] "+esc(cand.fn)+"</div></div>"+
+    "<div class='m'>"+fitOf(cand)+"<br>情绪余弦 "+(cand.sim||0).toFixed(3)+"</div></div>"+
     "<div class='cut-box'><b>✂ 剪这一首</b>（只作用于当前选中的这首，其它候选各记各的）<br>"+
-    "<label style='font-size:12px;'>起点: <input type='number' id='st' value='"+cut.start.toFixed(1)+"' step='0.5' min='0' style='width:70px;'>s</label> "+
-    "<label style='font-size:12px;'>时长: <input type='number' id='dur' value='"+cut.dur.toFixed(1)+"' step='0.5' min='0.5' style='width:70px;'>s</label> "+
-    "<button id='resetCutBtn' class='secondary' style='padding:2px 8px;font-size:11px;'>重置本曲</button>"+
-    "<span id='cutNote' style='font-size:10px;color:#888;'>"+(cut.manual ? "已手动裁剪" : "默认（起点 2s / 时长 = 乐段时长）")+"</span>"+
+    "<label>起点 <input type='number' id='st' value='"+cut.start.toFixed(1)+"' step='0.5' min='0'>s</label>　"+
+    "<label>时长 <input type='number' id='dur' value='"+cut.dur.toFixed(1)+"' step='0.5' min='0.5'>s</label>　"+
+    "<button id='resetCutBtn' class='secondary mini'>重置本曲</button> "+
+    "<span id='cutNote' class='hint'>"+(cut.manual ? "已手动裁剪" : "默认（起点 2s / 时长 = 乐段时长）")+"</span>"+
     "</div>"+
     "<div id='cands' style='margin-top:8px;'></div>"+
-    "<button id='previewBtn'>▶ 播放选中曲</button>"+
+    "<div class='player'><div class='row'>"+
+    "<button id='previewBtn' class='primary'>▶ 播放</button>"+
     "<button id='pauseBtn' class='secondary'>⏸ 停止</button>"+
-    "<span id='loadHint' class='loading-hint'></span>"+
-    "<div class='player'><input type='range' id='seekBar' min='0' max='100' value='0'>"+
+    "<button id='segExportBtn' class='green' title='只导出当前选中这一首的配乐（与试听同一首、同一裁剪；格式跟随右侧「导出」区）'>💾 单独导出这首</button>"+
+    "<span id='loadHint' class='loading-hint'></span></div>"+
+    "<input type='range' id='seekBar' min='0' max='100' value='0'>"+
     "<div class='time'><span id='curTime'>0:00</span><span id='durTime'>0:00</span></div></div>";
   var cands = document.getElementById("cands");
   (s.candidates||[]).forEach(function(c, i) {
     var cc = candCut(c, s);
     var d = document.createElement("div");
-    d.className = "song" + (i===s.track?" sel":"");
-    d.innerHTML = "["+i+"] " + esc(c.fn.slice(0,34)) + " <span style='color:#888;font-size:10px;'>" +
-      (c.dur ? c.dur.toFixed(0)+"s" : "?") + " / " + (c.bpm ? Math.round(c.bpm)+"bpm" : "?") +
+    d.className = "song cand" + (i===s.track?" sel":"");
+    d.innerHTML = "<span class='nm'>["+i+"] " + esc(c.fn.slice(0,34)) + "</span>" +
+      "<span class='cut-badge' id='cutbadge-"+i+"'"+(cc.manual?"":" style='display:none'")+">✂ "+cc.start.toFixed(0)+"s+"+cc.dur.toFixed(0)+"s</span>" +
+      "<span class='mt'>" + (c.dur ? c.dur.toFixed(0)+"s" : "?") + " / " + (c.bpm ? Math.round(c.bpm)+"bpm" : "?") +
       " / " + (c.score != null ? c.score.toFixed(3) : (c.sim||0).toFixed(3)) + "</span>" +
-      " <span class='cut-badge' id='cutbadge-"+i+"'"+(cc.manual?"":" style='display:none'")+">✂ "+cc.start.toFixed(0)+"s+"+cc.dur.toFixed(0)+"s</span>" +
-      " <button class='mini-play' title='试听这一首（用它的裁剪）'>▶</button>";
+      "<button class='mini-play' title='试听这一首（用它的裁剪）'>▶</button>" +
+      "<button class='mini-export' id='expbtn-"+i+"' title='单独导出这一首（不切换选中，用它自己的裁剪）'>💾</button>";
     d.onclick = function(e) {
-      if (e && e.target && e.target.className === "mini-play") { playCandidate(s, i); return; }
+      var cls = (e && e.target && e.target.className) || "";
+      if (cls === "mini-play") { playCandidate(s, i); return; }
+      if (cls === "mini-export") { exportOneSegment(s, i); return; }
       s.track = i; stopPreview(); renderDetail();
     };
     cands.appendChild(d);
@@ -1653,6 +1898,8 @@ async function renderDetail() {
   document.getElementById("dur").oninput = writeCut;
   document.getElementById("pauseBtn").onclick = function() { stopPreview(); };
   document.getElementById("previewBtn").onclick = function() { playCandidate(s, s.track); };
+  // 单独导出：导的就是**此刻试听的这一首**（s.track 已随 playCandidate 同步）
+  document.getElementById("segExportBtn").onclick = function() { exportOneSegment(s); };
 };
 // 播放第 i 个候选：用**它自己的裁剪**参数（起点/时长），与其它候选互不影响。
 async function playCandidate(s, i) {
@@ -1946,10 +2193,12 @@ document.getElementById("analyzeBtn").onclick = async function () {
         return (i + 1) + "." + (c ? c.fn.replace(/\.[^.]+$/, "").slice(0, 16) : "-");
       }).join(" / ") +
       "\n✂ 右侧详情面板：点哪首候选曲就剪哪首（起点/时长各记各的），▶ 单独试听" +
+      "，💾 把候选曲里的**任意一首**单独导出（不必先切过去，格式跟随「导出格式」）" +
       (aiOk ? "\n👁 AI看图 " + aiOk + " 个关键镜头（并发" + VLM_CONCURRENCY + "，仅用于剧本无线索处）｜模型 " + (vlModelOk || "-") : "") +
       (aiErr ? "\n⚠️ AI看图未生效（不影响剧本情绪）：" + aiErr : "");
     setProgress(bar, 100, "完成");
     document.getElementById("exportAllBtn").disabled = false;
+    syncHeader();                                   // 顶栏：步骤③打勾、④高亮
   } catch (e) {
     console.error(e);
     st.textContent = "❌ " + e.message;
@@ -2205,6 +2454,93 @@ function applyFade(buf, fadeIn, fadeOut) {
     var d = buf.getChannelData(ch);
     for (var i=0;i<fiLen && i<d.length;i++) d[i] *= i/fiLen;
     for (var i=0;i<foLen && i<d.length;i++) d[d.length-1-i] *= i/foLen;
+  }
+}
+
+// ===== 单曲导出（右侧 ④ 面板）：把候选曲里的**某一首**单独出一个文件 =====
+// 文件名独立成纯函数，便于自检断言（非法字符 / 超长 / 缺曲名都要兜住）。
+function segExportName(s, cand, ext) {
+  var safe = function (x) {
+    return String(x == null ? "" : x)
+      .replace(/[\\\/:*?"<>|\s]+/g, "_")     // Windows 文件名非法字符 + 空白
+      .replace(/_+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40).replace(/_+$/, "");
+  };
+  var segId = safe((s && s.id != null) ? s.id : "") || "x";
+  var base = safe(String((cand && cand.fn) || "").replace(/\.[^.]+$/, "")) || "song";
+  return "BGM_seg" + segId + "_" + base + "." + (ext || "mp3");
+}
+
+// idx 省略 = 导当前选中的那首；传 idx = 导候选列表里的任意一首（**不必先切过去**）。
+// 仍走唯一渲染入口 renderBGM([s], D)：拿到的就是它在整集里贡献的那段音
+//（同一首、同一裁剪、同样的对齐与淡入淡出、素材缺失时同样走兜底曲），
+// 不另起第二条拼接路径 —— 否则「试听 / 单曲导出 / 整集导出」三者迟早对不上。
+// 部分导出 ≠ 本集定稿 ⇒ **不写跨集历史**（rememberEpisode 只在整集导出时调）。
+async function exportOneSegment(s, idx) {
+  if (!s || !(s.candidates || []).length) { alert("请先分析：这一段还没有候选曲"); return; }
+  var i = (typeof idx === "number" && idx >= 0 && idx < s.candidates.length) ? idx : (s.track || 0);
+  var cand = s.candidates[i];
+  if (!cand) { alert("没有这一首"); return; }
+  stopPreview();                       // 试听停掉，免得音频上下文和导出抢资源
+  var bar = document.getElementById("pbar");
+  var st = document.getElementById("status");
+  var rowBtn = document.getElementById("expbtn-" + i);          // 候选行上那个 💾
+  var panelBtn = document.getElementById("segExportBtn");       // 面板上那个「导出当前这首」
+  var oldPanelText = panelBtn ? panelBtn.textContent : "";
+  var busy = function (on) {
+    if (rowBtn) { rowBtn.disabled = on; rowBtn.textContent = on ? "⏳" : "💾"; }
+    if (panelBtn) { panelBtn.disabled = on; panelBtn.textContent = on ? "⏳ 导出中..." : (oldPanelText || "💾 导出当前这首"); }
+  };
+  var oldTrack = s.track;
+  s.track = i;                    // 渲染链一律读 segCut(seg) = candidates[seg.track] ⇒ 导谁就临时指向谁
+  try {
+    busy(true);
+    var cut = candCut(cand, s);
+    var D = parseFloat(cut.dur);
+    if (!(D > 0)) D = (s.timeEnd - s.timeStart) || 10;
+    D = Math.max(0.5, D);
+    setProgress(bar, 10, "拼接这一首...");
+    await yieldUI();
+    var res = await renderBGM([s], D, function (k, n) {
+      setProgress(bar, 10 + Math.round((k / n) * 70), "构建段" + (k + 1) + "/" + n);
+    });
+    if (!res || !res.buf) throw new Error("拼接失败");
+    var aligned = res.buf, beforeDur = res.rawDur, blob, ext;
+    if (EXPORT_FMT === "mp3") {
+      setProgress(bar, 92, "编码MP3中（页面暂时无响应）...");
+      await yieldUI();
+      blob = bufferToMp3(aligned, 192); ext = "mp3";
+    } else {
+      setProgress(bar, 92, "打包WAV...");
+      blob = bufferToWav(aligned); ext = "wav";
+    }
+    var fname = segExportName(s, cand, ext);
+    var cutNote = cut.manual
+      ? ("裁剪 " + cut.start.toFixed(1) + "s 起 / " + cut.dur.toFixed(1) + "s")
+      : "默认裁剪（起点 2s / 时长 = 乐段时长）";
+    var diff = beforeDur - aligned.duration;
+    var fitNote = Math.abs(diff) > 0.5 ? "，已" + (diff > 0 ? "裁剪" : "补静音") + Math.abs(diff).toFixed(2) + "s" : "";
+    var head = "✅ 单曲导出 [" + i + "] " + cand.fn +
+      "\n文件：" + fname + "（" + ext.toUpperCase() + "｜" + cutNote + "）" +
+      "\n时长 " + aligned.duration.toFixed(2) + "s" + fitNote +
+      "｜属于段 " + s.id + "｜与「导出整集BGM」同一条渲染路径";
+    if (OUT_DIR) {
+      var wh = await OUT_DIR.getFileHandle(fname, { create: true });
+      var ws = await wh.createWritable();
+      await ws.write(blob); await ws.close();
+      if (st) st.textContent = head + "\n已写入 " + OUT_DIR.name + "/" + fname;
+    } else {
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(blob); a.download = fname; a.click();
+      if (st) st.textContent = head;
+    }
+    setProgress(bar, 100, "完成");
+  } catch (e) {
+    console.error(e);
+    if (st) st.textContent = "❌ 单曲导出失败：" + e.message;
+    setProgress(bar, 100, "错误");
+  } finally {
+    if (s.track === i) s.track = oldTrack;   // 用户中途没改选中才还原
+    busy(false);
   }
 }
 
