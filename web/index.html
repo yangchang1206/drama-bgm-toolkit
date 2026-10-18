@@ -5,7 +5,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>BGM工作台 v5.3</title>
+<title>BGM工作台 v5.4</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
 <style>
@@ -218,7 +218,7 @@ input[type=range] { width: 100%; margin-top: 2px; accent-color: #2563eb; }
 
 <!-- ================= 顶栏 ================= -->
 <div class="topbar">
-  <div class="logo">🎵 BGM工作台<span class="ver" title="情绪以剧本为主 + 视频节奏控换曲 + 候选曲各自剪切 + 跨集不重复用曲">v5.3 · 桌面版</span></div>
+  <div class="logo">🎵 BGM工作台<span class="ver" title="情绪以剧本为主 + 视频节奏控换曲 + 候选曲各自剪切 + 跨集不重复用曲">v5.4 · 桌面版</span></div>
   <div class="steps">
     <div class="step" id="step1"><i class="n">1</i> 选曲库</div>
     <div class="step" id="step2"><i class="n">2</i> 剧本+视频</div>
@@ -279,7 +279,7 @@ input[type=range] { width: 100%; margin-top: 2px; accent-color: #2563eb; }
     <div class="card">
       <h3>② 剧本 + 视频 <span class="badge">情绪以剧本为主</span></h3>
       <div class="scripthead">粘贴整集剧本（含 35-1、35-2 等场号）</div>
-      <textarea id="script" placeholder="粘贴整集剧本（含 35-1、35-2 等场号）"></textarea>
+      <textarea id="script" placeholder="粘贴整集剧本：支持「35-1 日 外…」场号，或分镜脚本「【镜头1 · 断点1】」格式"></textarea>
       <div class="row" style="margin-top:10px;">
         <span class="hint">视频：</span>
         <input type="file" id="video" accept="video/*">
@@ -822,7 +822,9 @@ async function scanDir(dirHandle, map) {
   var prog = document.getElementById("scanProgress");
   for await (var entry of dirHandle.values()) {
     if (entry.kind === "directory") {
-      await scanDir(entry, map);
+      // 递归的计数必须并回来：旧版把子目录里的数量丢了，音乐全在子目录时会显示
+      // 「已选：XX（0 个音频）」——用户以为没扫到，其实 SONG_MAP 已经装满了。
+      count += await scanDir(entry, map);
     } else if (entry.kind === "file" && /\.(mp3|wav|m4a|ogg|flac)$/i.test(entry.name)) {
       map[entry.name.toLowerCase()] = entry;
       count++;
@@ -1281,6 +1283,8 @@ document.getElementById("detectBtn").onclick = async function () {
     var short = SHOTS.filter(function (s) { return s.dur < 2; }).length;
     var longS = SHOTS.filter(function (s) { return s.dur >= 6; }).length;
     document.getElementById("timepoints").value = segsStr(mergeShortSegments(cuts));  // 仅作初值/参考
+    SHOTS_STAMP = vf.name + vf.size;               // 记上这批镜头属于哪个视频（否则随后点分析会重复检测，换视频后还可能错配）
+    TP_AUTO = document.getElementById("timepoints").value;
     document.getElementById("mergeInfo").textContent =
       "镜头 " + SHOTS.length + " 个 ｜ ASL 平均镜头时长 " + asl.toFixed(2) + "s ｜ 切点 " + cpm.toFixed(1) + " 次/分 ｜ 快镜头(<2s) " + short + " 个 ｜ 长镜头(≥6s) " + longS + " 个";
     renderTimeline();
@@ -1314,13 +1318,42 @@ function cosShots(a, b) {
   return 0.5;
 }
 
+// v5.4 场次头识别：只在**行首**匹配，兼容短剧常见的三种剧本写法。
+// 旧版用 /(\d{1,3}-\d{1,3})/ 在全文**任意位置**匹配 —— 「镜头1-7」「年龄：19-28岁」
+// 这类表格/备注/人物卡会被误判成场次头（还常切成没有内容的碎片）；真正的分镜脚本
+// （【镜头N】/【断点N】）反而一个场次都切不出来，情绪弧线永远退化成画面/默认。
+// 分档（按优先级取第一个命中 ≥2 次的）：
+//   ① 「12-1 日 外 小卖部」——集-场号（行首）
+//   ② 「【镜头3 · 断点1】」——分镜脚本镜头头
+//   ③ 「【断点2】」——分镜脚本大段头
+//   ④ 「第3集」——集头（兜底，整集当一场）
 function parseScenes(text) {
-  var lines = text.split("\n"); var scenes = []; var cur = null;
-  var re = /(\d{1,3}-\d{1,3})/;
-  for (var i=0; i<lines.length; i++) {
-    var m = lines[i].match(re);
-    if (m) { if (cur) scenes.push(cur); cur = {id:m[1], text:lines[i]}; }
-    else if (cur) cur.text += "\n"+lines[i];
+  var lines = String(text || "").split("\n");
+  var H_NN   = /^[\s　>·•*\-—|｜]*(?:[（(【\[]\s*)?(\d{1,4})\s*[-–—～~]\s*(\d{1,4})\s*(?![.\d])/;
+  var H_LENS = /^[\s　>·•*\-—|｜]*【\s*镜头\s*(\d{1,4})/;
+  var H_BRK  = /^[\s　>·•*\-—|｜]*【\s*(?:断点|场次|场)\s*(\d{1,4})/;
+  var H_EP   = /^[\s　>·•*\-—|｜]*第\s*(\d{1,4})\s*[集话回]/;
+  var countH = function (re) { var n = 0; for (var i = 0; i < lines.length; i++) { if (re.test(lines[i])) n++; } return n; };
+  var re = null, kind = "";
+  if (countH(H_NN) >= 2) { re = H_NN; kind = "NN"; }
+  else if (countH(H_LENS) >= 2) { re = H_LENS; kind = "镜头"; }
+  else if (countH(H_BRK) >= 2) { re = H_BRK; kind = "断点"; }
+  else if (countH(H_EP) >= 2) { re = H_EP; kind = "集"; }
+  if (!re) return [];
+  var scenes = []; var cur = null;
+  for (var li = 0; li < lines.length; li++) {
+    var ln = lines[li];
+    var m = ln.match(re);
+    if (m) {
+      if (cur) scenes.push(cur);
+      var id = (kind === "NN") ? (m[1] + "-" + m[2])
+             : (kind === "镜头") ? ("镜头" + m[1])
+             : (kind === "断点") ? ("断点" + m[1])
+             : ("第" + m[1] + "集");
+      cur = { id: id, text: ln };
+    } else if (cur) {
+      cur.text += "\n" + ln;
+    }
   }
   if (cur) scenes.push(cur);
   return scenes;
@@ -1331,8 +1364,20 @@ function parseScenes(text) {
 // v4 改按**场次正文字数权重**分配 —— 台词多的场通常拍得更长；
 // 再把预算边界吸附到最近的镜头切点，保证每场至少覆盖 1 个镜头、且单调不回退。
 function alignScenesToShots(scenes, shots, totalDur) {
-  if (!shots.length || !scenes.length) return { bounds: null };
-  var w = scenes.map(function (s) { return Math.max(1, String(s.text || "").replace(/\s/g, "").length); });
+  if (!shots.length) return { bounds: null, sceneCount: 0 };
+  if (!scenes.length) {
+    // 剧本没切出场次：把上一轮的场次残留清掉（同一视频重跑时 SHOTS 是复用的），
+    // 否则旧文本会继续参与情绪判定 ——「弧线永远是第一次那条」的另一个来源。
+    shots.forEach(function (sh) { sh.sceneIdx = -1; sh.sceneId = ""; sh.text = ""; });
+    return { bounds: null, sceneCount: 0 };
+  }
+  // 场次权重 = 正文字数，但做上限保护：粘贴的分镜脚本末尾常带着汇总表/自查清单，
+  // 全算进最后一场会把它的权重放大十几倍（那一段的情绪会摊到半个视频上）。
+  var lens = scenes.map(function (s) { return Math.max(1, String(s.text || "").replace(/\s/g, "").length); });
+  var sorted = lens.slice().sort(function (a, b) { return a - b; });
+  var med = sorted[Math.floor(sorted.length / 2)] || 1;
+  var cap = Math.max(160, med * 2.5);
+  var w = lens.map(function (v) { return Math.min(v, cap); });
   var sum = w.reduce(function (a, b) { return a + b; }, 0) || 1;
   var bounds = [0], acc = 0;
   for (var i = 0; i < w.length; i++) { acc += w[i]; bounds.push(acc / sum * totalDur); }
@@ -1358,7 +1403,18 @@ function alignScenesToShots(scenes, shots, totalDur) {
     sh.sceneId = scenes[idx] ? scenes[idx].id : "";
     sh.text = scenes[idx] ? scenes[idx].text : "";
   });
-  return { bounds: bounds };
+  return { bounds: bounds, sceneCount: scenes.length };
+}
+
+// 每次分析都从零开始算情绪：SHOTS 跨轮复用（同一个视频），必须先把上一轮的情绪
+// 派生字段清干净，否则本轮没算出新情绪的镜头会「继承」上一轮的结果 ——
+// 用户看到的「弧线一直是第一次分析那条」就包含这个原因。
+function clearShotMoodState(shots) {
+  shots.forEach(function (sh) {
+    sh.ruleMood = ""; sh.ruleTag = ""; sh.ruleScore = 0; sh.eng = 0;
+    sh.aiQuery = ""; sh.qKey = ""; sh.pickMood = "";
+    sh.query = ""; sh.mood = ""; sh.moodVec = null; sh.source = "";
+  });
 }
 
 // ===================== M3 情绪判定（规则必算，VLM 增强）=====================
@@ -1705,6 +1761,24 @@ function pickTracks(qv, seg, usedSongs, limit, epArtists) {
 // 所以：剧本能判出情绪档（score>0）→ 一律用剧本的 query；
 //       剧本这一场没有任何情绪线索 → 才用画面描述；
 //       都没有 → 交给 M7 降级链（延续上一镜头 / 默认中性）。
+//
+// M7 情绪落点（抽成函数，好让自检直接回归「重跑同一视频不继承上一轮情绪」）：
+// 能算出 query 的镜头按 query 落情绪；其余沿上一镜头情绪 → 再无则默认中性铺底。
+function assignShotMoods(shots, qMap, defVec) {
+  shots.forEach(function (sh) {
+    if (sh.qKey && qMap[sh.qKey]) {
+      sh.moodVec = normF32(qMap[sh.qKey]);
+      sh.query = sh.qKey;
+      sh.mood = sh.pickMood || "日常";
+    }
+  });
+  var lastMood = "", lastVec = null;
+  shots.forEach(function (sh) {
+    if (sh.moodVec) { lastMood = sh.mood; lastVec = sh.moodVec; return; }
+    if (lastVec) { sh.moodVec = lastVec; sh.mood = lastMood; sh.source = "延续"; sh.query = "（延续上一镜头情绪）"; }
+    else { sh.moodVec = defVec; sh.mood = "日常"; sh.source = "默认"; sh.query = MOOD_QUERY["日常"]; }
+  });
+}
 function chooseMoodQuery(sh) {
   var ruleQ = (sh.ruleScore > 0 && sh.ruleMood) ? (MOOD_QUERY[sh.ruleMood] || "") : "";
   if (ruleQ) return { q: ruleQ, source: "剧本", mood: sh.ruleMood };
@@ -2044,6 +2118,9 @@ document.getElementById("analyzeBtn").onclick = async function () {
     await yieldUI();
     var scenes = parseScenes(script);
     alignScenesToShots(scenes, SHOTS, T);
+    // 同一视频重跑时 SHOTS 会复用：先把上一轮的情绪字段清掉，
+    // 否则本轮没算出新情绪的镜头会悄悄沿用上一轮的值（「弧线老是第一次那条」的原因之一）。
+    clearShotMoodState(SHOTS);
 
     // ---------- 3. M3 规则层情绪（永远先算，0 成本）----------
     SHOTS.forEach(function (sh) {
@@ -2099,20 +2176,8 @@ document.getElementById("analyzeBtn").onclick = async function () {
     var qMap = {};
     uniqQ.forEach(function (q, i) { qMap[q] = embs[i]; });
     var defVec = normF32(qMap[DEF_Q] || embs[0]);
-    SHOTS.forEach(function (sh) {
-      if (sh.qKey && qMap[sh.qKey]) {
-        sh.moodVec = normF32(qMap[sh.qKey]);
-        sh.query = sh.qKey;
-        sh.mood = sh.pickMood || "日常";
-      }
-    });
     // M7 降级链：无 AI 无规则 → 沿用上一镜头情绪 → 全无则默认中性铺底
-    var lastMood = "", lastVec = null;
-    SHOTS.forEach(function (sh) {
-      if (sh.moodVec) { lastMood = sh.mood; lastVec = sh.moodVec; return; }
-      if (lastVec) { sh.moodVec = lastVec; sh.mood = lastMood; sh.source = "延续"; sh.query = "（延续上一镜头情绪）"; }
-      else { sh.moodVec = defVec; sh.mood = "日常"; sh.source = "默认"; sh.query = DEF_Q; }
-    });
+    assignShotMoods(SHOTS, qMap, defVec);
     renderTimeline();
 
     // ---------- 6. M4 乐段聚合（DP 最优分段 / 用户手填覆盖）----------
@@ -2177,6 +2242,9 @@ document.getElementById("analyzeBtn").onclick = async function () {
       STATE.segments.forEach(function (s) { var c = s.candidates[s.track]; if (c && c.dur) { n++; if (c.dur >= s.dur) ok++; } });
       return n ? ("选中曲目时长 ≥ 乐段时长 的比例：" + Math.round(ok / n * 100) + "%（" + ok + "/" + n + "）") : "";
     })();
+    var scriptNote = "";
+    if (!scenes.length) scriptNote = "\n⚠️ 剧本没识别到场次头（支持整行「12-1 日 外…」，或分镜脚本「【镜头1 · 断点1】」格式）——情绪弧线退化为画面/默认";
+    else if (srcCount("剧本") === 0) scriptNote = "\n⚠️ 剧本解析出 " + scenes.length + " 个场次，但没有场次命中情绪词——弧线主要靠画面/默认";
     var idealMax = idealMaxSeg(SHOTS);
     st.textContent =
       "✅ 完成！" + SHOTS.length + " 个镜头 → " + STATE.segments.length + " 个乐段，视频 " + T.toFixed(1) + "s" +
@@ -2195,7 +2263,8 @@ document.getElementById("analyzeBtn").onclick = async function () {
       "\n✂ 右侧详情面板：点哪首候选曲就剪哪首（起点/时长各记各的），▶ 单独试听" +
       "，💾 把候选曲里的**任意一首**单独导出（不必先切过去，格式跟随「导出格式」）" +
       (aiOk ? "\n👁 AI看图 " + aiOk + " 个关键镜头（并发" + VLM_CONCURRENCY + "，仅用于剧本无线索处）｜模型 " + (vlModelOk || "-") : "") +
-      (aiErr ? "\n⚠️ AI看图未生效（不影响剧本情绪）：" + aiErr : "");
+      (aiErr ? "\n⚠️ AI看图未生效（不影响剧本情绪）：" + aiErr : "") +
+      scriptNote;
     setProgress(bar, 100, "完成");
     document.getElementById("exportAllBtn").disabled = false;
     syncHeader();                                   // 顶栏：步骤③打勾、④高亮
@@ -2290,7 +2359,11 @@ async function mixAtCuts(bufs, starts, FEs, totalDur) {
       for (var j = 0; j < L; j++) {
         var g = 1;
         if (feIn > 0 && j < inLen) g *= Math.sin((j / inLen) * Math.PI / 2);
-        if (feOut > 0 && (b.length - 1 - j) < outLen) g *= Math.cos(((b.length - 1 - j) / outLen) * Math.PI / 2);
+        // 淡出相位必须用「进入淡出窗口后的已进行时长」，而不是「剩余时长」——
+        // 用剩余时长会把曲线做反：窗口起点从满音量骤降到 0（听感=突然断开，且比
+        // 镜头切点早 FE/2 秒），窗口终点反而升回满音量与下一段叠加 +6dB。
+        // 与淡入 sin 构成等功率对（中点 ≈0.707/0.707），换曲点正好落在镜头切点上。
+        if (feOut > 0 && (b.length - 1 - j) < outLen) g *= Math.cos((Math.max(0, j - (b.length - outLen)) / outLen) * Math.PI / 2);
         var k = off + j;
         if (k >= 0 && k < len) od[k] += bd[j] * g;
       }
@@ -2344,7 +2417,9 @@ async function renderBGM(segs, totalDur, onProgress) {
     var tail = (i2 < segs.length - 1 ? FEs[i2 + 1] / 2 : 0);
     onProgress && onProgress(i2, segs.length);
     var want = Ds[i2] + head + tail;
-    var sb = await buildSegmentBuffer(segs[i2], want, Math.max(0, cuts[i2].start - head));
+    // 起点直接传 cuts.start - head（允许为负）：负值时由 buildSegmentBuffer 前垫静音，
+    // 保证素材落点不被提前（旧版 Math.max(0, …) 会把整段内容前移最多 FE/2 秒）。
+    var sb = await buildSegmentBuffer(segs[i2], want, cuts[i2].start - head);
     if (!sb || sb.length < 100) sb = ctx.createBuffer(1, Math.max(1, Math.floor(want * ctx.sampleRate)), ctx.sampleRate);
     sb = alignToDuration(sb, want);
     segLens.push(+sb.duration.toFixed(2));
@@ -2367,15 +2442,20 @@ async function buildSegmentBuffer(seg, neededDur, fromStart) {
   var pieces = []; var filled = 0; var used = new Set();
   var selCut = segCut(seg);
   var off = (fromStart == null) ? (selCut.start || 0) : fromStart;
+  // 起点早于素材开头（用户把起点剪得比交叉余量还靠前）：前面垫静音，
+  // 绝不能把整段内容提前 —— 前移会让这一段的听感落点快于镜头切点（误差来源之一）。
+  var padFront = 0;
+  if (off < 0) { padFront = -off; off = 0; }
+  var bodyDur = Math.max(0.05, neededDur - padFront);
   var order = buildOrder(seg);        // 选中的那首优先，其余按分数兜底
-  for (var i=0; i<order.length && filled < neededDur - 0.01; i++) {
+  for (var i=0; i<order.length && filled < bodyDur - 0.01; i++) {
     var c = order[i];
     if (used.has(c.fn)) continue;
     var fh = SONG_MAP[c.fn.toLowerCase()];
     if (!fh) continue;
     try {
       var full = await decodeAudioFile(fh);
-      var remain = neededDur - filled;
+      var remain = bodyDur - filled;
       // 换到兜底曲时，用兜底曲自己的裁剪起点（用户可能也剪过它），没有就用默认 2s
       var useOff = (i === 0) ? off : Math.max(0, candCut(c, seg).start);
       var piece = sliceBuffer(full, useOff, remain);
@@ -2385,6 +2465,13 @@ async function buildSegmentBuffer(seg, neededDur, fromStart) {
   }
   if (!pieces.length) return null;
   var built = (pieces.length === 1) ? pieces[0] : await crossfadeConcatAsync(pieces, 1.5);
+  built = alignToDuration(built, bodyDur);
+  if (padFront > 0.001) {
+    var padLen = Math.round(padFront * built.sampleRate);
+    var padded = getCtx().createBuffer(built.numberOfChannels, padLen + built.length, built.sampleRate);
+    for (var ch2 = 0; ch2 < built.numberOfChannels; ch2++) padded.getChannelData(ch2).set(built.getChannelData(ch2), padLen);
+    built = padded;
+  }
   return alignToDuration(built, neededDur);   // 严格等于 neededDur，杜绝累积误差
 }
 

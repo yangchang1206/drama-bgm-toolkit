@@ -158,6 +158,33 @@ section("T1b fadeWidthOf 自适应规则");
   ok("fadeWidthOf(6,6) ≈ 3.6（中等给中交叉）", near(G.fadeWidthOf(6, 6), 3.6, 1e-9), G.fadeWidthOf(6, 6));
   ok("fadeWidthOf(1,1) ≤ 0.8（快切给短交叉）", G.fadeWidthOf(1, 1) <= 0.8 + 1e-9, G.fadeWidthOf(1, 1));
 }
+section("T1c 交叉包络形状（反极性掩码法，防「淡出反向」回归）");
+{
+  // 两段素材分别灌 +1 / −1 的直流：等功率交叉窗口内应严格等于 cosθ−sinθ
+  // （1 → 0 → −1 单调下降）。旧实现淡出用「剩余时长」做相位，曲线方向做反，
+  // 整个窗口恒等于 0（= 静音断层 + 两端硬切），就是用户听到的「突然断开」。
+  const SR = 8000;
+  G.FE_MIN = 1.5; G.FE_MAX = 4.0;
+  const Ds = [10, 10], FEs = [0, 2], starts = [0, 10];
+  const bufs = Ds.map((d, i) => {
+    const head = i > 0 ? FEs[i] / 2 : 0;
+    const tail = i < Ds.length - 1 ? FEs[i + 1] / 2 : 0;
+    const b = new FakeAudioBuffer(1, Math.round((d + head + tail) * SR), SR);
+    b.getChannelData(0).fill(i === 0 ? 1 : -1);
+    return b;
+  });
+  const out = await G.mixAtCuts(bufs, starts, FEs, 14);
+  const data = out.getChannelData(0);
+  const at = t => data[Math.round(t * SR)];
+  ok("窗口起点 = 满音量（旧版此处骤降到 0）", Math.abs(at(9.005) - 1) < 0.03, at(9.005).toFixed(3));
+  ok("9.5s ≈ +0.54（cosθ−sinθ 理论值）", Math.abs(at(9.5) - 0.5412) < 0.03, at(9.5).toFixed(3));
+  ok("窗口中点回头相消 ≈ 0（等功率中点）", Math.abs(at(10)) < 0.05, at(10).toFixed(3));
+  ok("10.5s ≈ −0.54（过中点后转负）", Math.abs(at(10.5) + 0.5412) < 0.03, at(10.5).toFixed(3));
+  ok("窗口终点 ≈ −1（新段满音量接管）", Math.abs(at(10.995) + 1) < 0.03, at(10.995).toFixed(3));
+  let mono = true, prev = at(9.05);
+  for (let t = 9.1; t <= 10.95; t += 0.05) { const v = at(t); if (v > prev + 1e-3) { mono = false; break; } prev = v; }
+  ok("窗口内单调下降（增益形状正确，不是先降回再升起）", mono);
+}
 
 // ================= T2 M4 DP 乐段聚合 =================
 section("T2 M4 DP 乐段聚合：边界落在情绪突变处");
@@ -250,6 +277,55 @@ section("T6 M2 镜头↔场次对齐：按字数权重，单调不回退");
   ok("字数少的场拿到更短区间", (b[1] - b[0]) < (b[2] - b[1]), (b[1] - b[0]) + " vs " + (b[2] - b[1]));
   const covered = shots.every(s => s.sceneId);
   ok("每个镜头都分到了场号", covered);
+}
+
+// ================= T6b 场次头识别（v5.4：行首匹配 + 分镜脚本格式）=================
+section("T6b 场次头识别：分镜脚本 / 集-场头都能切，表格与备注不再误判");
+{
+  const sb = [
+    "【断点1】赵耀祖甩锅 — 生成片段1",
+    "断点1 位置锚点：小卖部门口（日 外）。",
+    "【镜头1 · 断点1】",
+    "台词：赵耀祖（梗脖嘶吼）：都怪你！",
+    "情绪标记：【甩锅·把错都推出去】",
+    "【镜头2 · 断点1】",
+    "台词：刘桂香（假装严厉）：怎么跟你姐说话呢！",
+    "| 断点1 | 赵耀祖甩锅 | 镜头1-7 | 23.9s |",
+    "备注：镜头1-2、4 为同一句（台词1）三拆。",
+  ].join("\n");
+  const sc1 = G.parseScenes(sb);
+  ok("分镜脚本切出 2 个镜头头", sc1.length === 2, JSON.stringify(sc1.map(s => s.id)));
+  ok("场次号 = 镜头1 / 镜头2", sc1[0] && sc1[0].id === "镜头1" && sc1[1].id === "镜头2");
+
+  const dx = [
+    "年龄：19-28岁身份：混混。",
+    "67-1 日 外/内 小区小卖部",
+    "赵耀祖瘫坐在台阶上梗着脖子吼：都怪你！",
+    "67-2 日 内 小卖部",
+    "刘桂香拍腿哭嚎，求饶。",
+    "备注：镜头1-2、4 为同一句（台词1）。",
+  ].join("\n");
+  const sc2 = G.parseScenes(dx);
+  ok("集-场头切出 2 场，编号 = 67-1 / 67-2", sc2.length === 2 && sc2[0].id === "67-1" && sc2[1].id === "67-2", JSON.stringify(sc2.map(s => s.id)));
+  ok("「年龄：19-28岁」行没有被误判成场次", sc2.length === 2);
+
+  const plain = "赵耀祖：都怪你！\n刘桂香：耀祖！怎么跟你姐说话呢！\n（两人对视）";
+  ok("纯对白（无场次头）→ 空数组，改为给出警告提示", G.parseScenes(plain).length === 0);
+
+  const scenes = [
+    { id: "1", text: "短".repeat(200) },
+    { id: "2", text: "短".repeat(200) },
+    { id: "3", text: "短".repeat(200) },
+    { id: "4", text: "短".repeat(6000) },
+  ];
+  const shots4 = Array.from({ length: 40 }, (_, i) => ({ i, t0: i, t1: i + 1, dur: 1 }));
+  const r4 = G.alignScenesToShots(scenes, shots4, 40);
+  const share = (r4.bounds[4] - r4.bounds[3]) / 40;
+  ok("超长场次权重被截（占比 ≤ 60%，旧版 ≈ 91%）", share <= 0.6, (share * 100).toFixed(1) + "%");
+
+  const shots2 = [{ i: 0, t0: 0, t1: 5, dur: 5, sceneId: "旧场", text: "旧文本" }];
+  G.alignScenesToShots([], shots2, 5);
+  ok("剧本切不出场次时，旧场次字段被清空（重跑不继承）", shots2[0].text === "" && shots2[0].sceneId === "");
 }
 
 // ================= T7 M3 关键镜头采样 =================
@@ -604,6 +680,45 @@ section("T15 单曲导出：候选里任意一首都能单独导 + 文件名清�
   ok("缺段号/缺曲名也有兜底名", /^BGM_seg[a-z]+_song\.wav$/.test(n2), n2);
   const n3 = G.segExportName({ id: "1" }, { fn: "长".repeat(60) + ".mp3" }, "wav");
   ok("超长曲名被截断（整名 ≤55 字符）", n3.length <= 55, n3.length + " 字符 → " + n3);
+}
+
+// ================= T16 音乐文件夹递归计数（问题③回归）=================
+section("T16 音乐文件夹：子目录里的音频也要计入「已选：N 个音频」");
+{
+  const file = n => ({ kind: "file", name: n });
+  const dir = ch => ({ kind: "directory", name: "d", values: async function* () { for (const c of ch) yield c; } });
+  const root = dir([
+    dir([file("a.mp3"), file("b.wav"), file("note.txt")]),
+    dir([dir([file("c.flac")])]),
+    file("top.mp3"),
+  ]);
+  G.SONG_MAP = {};
+  const total = await G.scanDir(root, G.SONG_MAP);
+  ok("递归计数 = 4（旧版只数顶层 = 1）", total === 4, "total=" + total);
+  ok("SONG_MAP 装满 4 个可解码文件", Object.keys(G.SONG_MAP).length === 4, Object.keys(G.SONG_MAP).join(","));
+  ok("非音频文件被忽略", !("note.txt" in G.SONG_MAP));
+}
+
+// ================= T17 重跑不继承上一轮情绪（问题①回归）=================
+section("T17 分析可重入：同一视频重跑，情绪从零算，不继承上一轮");
+{
+  const shots = Array.from({ length: 4 }, (_, i) => ({
+    i, t0: i, t1: i + 1, dur: 1,
+    ruleMood: "紧张动作", ruleScore: 1.2, aiQuery: "旧画面", qKey: "旧",
+    pickMood: "紧张动作", source: "剧本", query: "旧", mood: "悲情压抑",
+    moodVec: new Float32Array([0, 0, 1]),
+  }));
+  G.clearShotMoodState(shots);
+  ok("clearShotMoodState 清空上一轮所有派生字段",
+     shots.every(s => !s.moodVec && s.mood === "" && s.aiQuery === "" && s.source === "" && s.query === "") === true);
+
+  const qMap = { "q1": new Float32Array([1, 0, 0]) };
+  shots[1].qKey = "q1"; shots[1].pickMood = "温暖治愈";
+  G.assignShotMoods(shots, qMap, new Float32Array([0, 1, 0]));
+  ok("有 query 的镜头用新情绪", shots[1].mood === "温暖治愈", shots[1].mood);
+  ok("前一个镜头降级为默认「日常」", shots[0].mood === "日常" && shots[0].source === "默认", shots[0].mood + "/" + shots[0].source);
+  ok("后两个镜头沿上新镜头情绪（延续）", shots[2].mood === "温暖治愈" && shots[2].source === "延续", shots[2].mood + "/" + shots[2].source);
+  ok("没有任何镜头残留上一轮的「悲情压抑」", shots.every(s => s.mood !== "悲情压抑"));
 }
 
 // ================= 汇总 =================
